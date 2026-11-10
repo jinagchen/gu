@@ -1,6 +1,6 @@
 # C++ 接口约定
 
-契约版本 API-1.0，日期 2026 年 11 月 10 日，对应 [总体设计](architecture.md)。头文件仅有声明，没有可链接实现。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
+契约版本 API-1.1，日期 2026 年 11 月 10 日，对应 DESIGN-1.1 [总体设计](architecture.md)。本版将 IoBackend::io_uring 替换为 windows_iocp，目标为本机 Windows；其余公开语义不变。头文件仅有声明，没有可链接引擎实现。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
 
 ## 1 类型和返回值
 
@@ -47,7 +47,7 @@ Get 返回的 `version` 是该向量最后修改序号，`snapshot_sequence` 是
 
 MemoryBudget 各分区均以字节指定，总和必须等于 total_bytes；total_bytes=0 或缺必需分区不能通过 Open。分区涵盖缓存、增量、元数据、工作区和安全余量，具体用途见总体设计。
 
-`block_bytes=4096` 是配置初值，不是平台对齐保证。后端探测内存地址和偏移对齐；无法满足 direct_reads 时返回 unsupported 或 invalid_argument，调用方显式改配置后才允许 buffered 路线。
+`block_bytes=4096` 是配置初值，不是平台对齐保证。direct_reads 在 Windows 映射为 FILE_FLAG_NO_BUFFERING；后端探测逻辑/物理扇区并检查地址、偏移和长度。无法满足时返回 unsupported 或 invalid_argument，调用方显式改配置后才允许 buffered 路线。io_backend 可取 synchronous 或 windows_iocp。
 
 | 参数 | 校验和语义 |
 | --- | --- |
@@ -92,14 +92,14 @@ ReadRequest 持有 FileLease 和 BufferLease，校验 `block.file_id == file.Id(
 | WalWriter::Append | 仅写协调器调用；处理短写或报告错误，不等于持久化，不并发交错记录 |
 | WalWriter::Sync | 同步所有此前追加的数据并返回状态；组提交由上层控制 |
 
-同步后端允许在 Submit 内完成；io_uring 后端由完成线程驱动。负的 CQE 结果转换为项目错误和系统错误，正的短读不能当作成功完整块。对齐模式下不盲目用未对齐尾缓冲重试。
+同步后端允许在 Submit 内完成；IOCP 后端为每个请求保留独立 OVERLAPPED，完成线程通过 GetQueuedCompletionStatus 取得结果。ReadFile 返回 ERROR_IO_PENDING 表示已接管；立即成功也须遵守默认 IOCP 完成包规则，不重复通知。初版禁止设置跳过成功完成通知的模式。同步提交失败且未接管时不等待完成包；带非空 OVERLAPPED 的失败完成仍须归还在途资源。短读不能当作完整块，对齐模式下不盲目用未对齐尾缓冲重试。
 
 取消查询仅解除等待者资格，ReadBackend 第一版不承诺内核取消。缓冲和文件在最终完成回调结束前仍被后端固定；共享缓存引用若仍有其他等待者，不能随单个查询超时撤销。
 
-BufferLease 的可写入口只供后端或填充者使用，缓存发布后只读；同一缓冲不允许被多个在途写填充。缓冲池保证地址稳定与明确容量，不能将普通 vector 地址直接假定为 O_DIRECT 合法地址。
+BufferLease 的可写入口只供后端或填充者使用，缓存发布后只读；同一缓冲不允许被多个在途写填充。缓冲池保证地址稳定与明确容量，不能将普通 vector 地址直接假定为无缓冲 I/O 合法地址。
 
 ## 6 契约演进
 
 公开类型或语义改变时修改 API 版本并更新头文件、文档、基准与调用示例。单纯新增计数不改变已存在字段含义。阶段二若证实依赖无法走该读接口，先记录决策并修改契约，不在实现中绕过后仍声称符合设计。
 
-Linux 接口语义依据：open(2)、fsync(2)、io_uring(7) 官方 Linux man-pages。这里的源代码声明将平台特定内容保留在实现中，不要求 Windows 编译头文件时具备 liburing。
+Windows 接口语义依据及持久化限制见 [Windows 平台约定](windows-platform.md)。平台类型保留在实现中，不将 windows.h 暴露到核心公开头文件；系统错误保存 GetLastError 的相应结果。

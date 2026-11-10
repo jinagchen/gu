@@ -46,7 +46,7 @@ using Result = std::variant<T, Error>;
 struct Success {};
 
 enum class Metric { squared_l2 };
-enum class IoBackend { synchronous, io_uring };
+enum class IoBackend { synchronous, windows_iocp };
 enum class CachePolicy { disabled, clock };
 
 struct MemoryBudget {

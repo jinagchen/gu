@@ -1,0 +1,29 @@
+diff --git a/src/pq_flash_index.cpp b/src/pq_flash_index.cpp
+index e26df08..37a53f4 100644
+--- a/src/pq_flash_index.cpp
++++ b/src/pq_flash_index.cpp
+@@ -498,10 +498,7 @@ template <typename T, typename LabelT> void PQFlashIndex<T, LabelT>::use_medoids
+     alloc_aligned(((void **)&_centroid_data), _num_medoids * _aligned_dim * sizeof(float), 32);
+     std::memset(_centroid_data, 0, _num_medoids * _aligned_dim * sizeof(float));
+ 
+-    // borrow ctx
+-    ScratchStoreManager<SSDThreadData<T>> manager(this->_thread_data);
+-    auto data = manager.scratch_space();
+-    IOContext &ctx = data->ctx;
++    // read_nodes owns the scratch lease; borrowing here deadlocks with one thread.
+     diskann::cout << "Loading centroid data from medoids vector data of " << _num_medoids << " medoid(s)" << std::endl;
+ 
+     std::vector<uint32_t> nodes_to_read;
+diff --git a/src/scratch.cpp b/src/scratch.cpp
+index 112c65d..216bffb 100644
+--- a/src/scratch.cpp
++++ b/src/scratch.cpp
+@@ -115,7 +115,7 @@ template <typename T> SSDQueryScratch<T>::~SSDQueryScratch()
+     diskann::aligned_free((void *)sector_scratch);
+     diskann::aligned_free((void *)aligned_query_T);
+ 
+-    delete[] _pq_scratch;
++    delete _pq_scratch;
+ }
+ 
+ template <typename T>

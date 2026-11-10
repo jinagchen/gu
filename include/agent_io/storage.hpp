@@ -26,7 +26,7 @@ public:
     virtual std::span<const std::byte> Bytes() const noexcept = 0;
 };
 
-// The implementation pins both the descriptor and its immutable file identity.
+// The implementation pins both the native handle and immutable file identity.
 class FileLease {
 public:
     virtual ~FileLease() = default;

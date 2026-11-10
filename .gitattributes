@@ -1,0 +1,3 @@
+docs/evidence/stage2/* -text whitespace=cr-at-eol
+docs/evidence/stage2/*.log whitespace=cr-at-eol,-blank-at-eol
+tools/environment/*.patch -text whitespace=-blank-at-eol

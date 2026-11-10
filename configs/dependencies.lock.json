@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "platform": "windows-x64-msvc143",
+  "diskann": {
+    "repository": "https://github.com/microsoft/DiskANN.git",
+    "tag": "0.6.1",
+    "commit": "4c31367b6c3df5395bf8b786299988a5d001ec5a",
+    "license": "MIT",
+    "local_patch": "tools/environment/diskann-0.6.1.patch",
+    "gperftools_commit": "fe85bbdf4cb891a67a8e2109c1c22a33aa958c7e"
+  },
+  "nuget": {
+    "version": "6.12.1",
+    "sha256": "0790bb7a0c898e44b70f2b65e3070b4db8af23897e38b8653d72d268b6e8bb11",
+    "packages": {
+      "boost": "1.78.0",
+      "boost_program_options-vc143": "1.78.0",
+      "boost_unit_test_framework-vc143": "1.78.0",
+      "intelopenmp.redist.win": "2022.0.3.3747",
+      "intelopenmp.devel.win": "2022.0.3.3747",
+      "intelmkl.static.win-x64": "2022.0.3.171"
+    }
+  },
+  "python": {
+    "tested_version": "3.12.10",
+    "requirements": "evaluation/requirements.lock.txt"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "purpose": "planning_estimate_not_large_scale_measurement",
+  "vector_count": 1000000,
+  "dimension": 768,
+  "element_bytes": 4,
+  "memory_fraction": 0.2,
+  "total_memory_bytes": 614400000,
+  "pq_bytes_per_vector": 64,
+  "graph_max_degree": 32,
+  "block_bytes": 4096,
+  "max_queries": 8,
+  "max_inflight_reads": 64,
+  "max_pending_writes": 64,
+  "max_retained_delta_vectors": 12288,
+  "delta_record_overhead_bytes": 32,
+  "shadow_entry_budget_bytes": 32,
+  "max_disk_segments": 16,
+  "max_retained_generations": 2,
+  "query_memory_bytes": {
+    "cache": 245760000,
+    "delta": 122880000,
+    "metadata": 122880000,
+    "workspace": 92160000,
+    "reserve": 30720000
+  },
+  "rebuild_memory_bytes": {
+    "cache": 100663296,
+    "delta": 67108864,
+    "metadata": 167772160,
+    "workspace": 245301248,
+    "reserve": 33554432
+  },
+  "background_build_workspace_cap_bytes": 209715200,
+  "required_free_disk_bytes": 42949672960,
+  "notes": [
+    "Budgets are design inputs, not an implemented engine allocator.",
+    "Retained delta cap includes active, frozen and old-query-pinned records together.",
+    "Retained generations include old query references; stop publication or admission at cap.",
+    "Background build may start only after cache shrinks and resource reservations succeed.",
+    "Whole-index rebuild within this limit is unproven; test bounded partitioning before enabling it.",
+    "Phase-two build/rebuild fixtures use a separate 512 MiB job limit.",
+    "First bulk build and official memory rules remain separate follow-up acceptance items."
+  ]
+}

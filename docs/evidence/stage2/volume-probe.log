@@ -1,0 +1,9 @@
+file_flush=pass; logical_sector=512; alignment=4096
+synchronous_unbuffered_read=pass; bytes=4096
+synchronous_eof_short_read=pass; bytes=0
+iocp_unbuffered_reads=pass; requests=2; bytes=8192
+iocp_eof_error=pass
+unaligned_read_rejected=pass
+cancel_and_drain=pass
+job_commit_limit=pass; limit_bytes=67108864; rejected_bytes=100663296; error=1455; peak_job_commit_bytes=101683200
+scope=functionality_only; engine_not_implemented

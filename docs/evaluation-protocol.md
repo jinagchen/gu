@@ -1,6 +1,6 @@
 # C++ 基准与 Python 评测协议
 
-协议版本 EVAL-1，日期 2026 年 11 月 10 日。对应 DESIGN-1.0 与 REQ-1.0。
+协议版本 EVAL-1，日期 2026 年 11 月 10 日。对应 DESIGN-1.1 与 REQ-1.0，当前执行平台为本机 Windows；正式 CLI 尚未实现。
 
 本次仅交付协议和示例文件，未实现下列命令。示例结果是用于检查字段与逻辑的一条合成数据，不是测得的吞吐、召回或延迟。
 
@@ -35,6 +35,8 @@ python -m evaluation.check --run <run-directory>
 - 未知字段报配置错误，不能默默忽略拼写错误。
 
 运行参数分成 engine、search、workload 和 measurement；不得把客户端到达速率、搜索候选预算与内核队列深度混成一个并发参数。
+
+io_backend 当前取 synchronous 或 windows_iocp。Windows 内存约束和观测须记录 Job Object 提交内存限额、峰值提交量、工作集及计量范围；不能将提交限额称为包含系统文件缓存的物理内存限额。详见 [Windows 平台约定](windows-platform.md)。
 
 ## 3 请求和动态轨迹
 

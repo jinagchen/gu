@@ -11,6 +11,7 @@ static_assert(sizeof(Sequence) == 8);
 static_assert(!std::is_copy_constructible_v<Engine>);
 static_assert(std::is_abstract_v<ReadBackend>);
 static_assert(std::is_abstract_v<WalWriter>);
+static_assert(IoBackend::synchronous != IoBackend::windows_iocp);
 static_assert(std::is_same_v<
               decltype(std::declval<Engine&>().Search(
                   std::declval<std::span<const float>>(),

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "limit_commit_bytes": 536870912,
+  "kernel_peak_job_commit_bytes": 123727872,
+  "sampled_peak_private_bytes": 123703296,
+  "sampled_peak_working_set_bytes": 133824512,
+  "total_processes": 5,
+  "sample_interval_ms": 5,
+  "elapsed_ms": 1375,
+  "timed_out": false,
+  "exit_code": 0
+}
