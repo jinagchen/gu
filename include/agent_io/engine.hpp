@@ -58,8 +58,33 @@ struct MemoryBudget {
     std::uint64_t reserve_bytes = 0;
 };
 
+struct ResourceLimits {
+    std::uint32_t max_disk_segments = 16;
+    std::uint32_t max_retained_generations = 2;
+    std::uint32_t max_retained_delta_vectors = 12288;
+    std::uint64_t background_workspace_bytes = 209715200;
+    std::uint64_t min_free_disk_bytes = 42949672960;
+};
+
+struct ReadScheduling {
+    std::uint32_t demand_reserve = 8;
+    std::uint32_t background_reserve = 1;
+    std::uint32_t max_background_reads = 8;
+    std::uint32_t demand_burst_before_background = 8;
+};
+
+struct WalOptions {
+    std::uint64_t rotation_bytes = 67108864;
+    std::uint32_t max_frame_bytes = 1048576;
+};
+
 struct EngineOptions {
     MemoryBudget memory;
+    // Missing rebuild_memory disables maintenance that constructs new segments.
+    std::optional<MemoryBudget> rebuild_memory;
+    ResourceLimits resources;
+    ReadScheduling read_scheduling;
+    WalOptions wal;
     IoBackend io_backend = IoBackend::synchronous;
     CachePolicy cache_policy = CachePolicy::clock;
     bool direct_reads = true;
