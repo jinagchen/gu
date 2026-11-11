@@ -1,0 +1,2 @@
+{"schema_version":1,"protocol_version":"EVAL-1.1","purpose":"contract_example","run_id":"stage3-a-normal","sampled_ns":"0","private_bytes":null,"working_set_bytes":null,"kernel_peak_job_commit_bytes":null,"unavailable_reason":"Contract example; no resource measurement executed"}
+{"schema_version":1,"protocol_version":"EVAL-1.1","purpose":"contract_example","run_id":"stage3-a-normal","sampled_ns":"1000000","private_bytes":null,"working_set_bytes":null,"kernel_peak_job_commit_bytes":null,"unavailable_reason":"Contract example; no resource measurement executed"}

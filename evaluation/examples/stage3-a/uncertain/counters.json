@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "protocol_version": "EVAL-1.1",
+  "purpose": "contract_example",
+  "run_id": "stage3-a-uncertain",
+  "duration_ns": "1000000",
+  "drain_ns": "0",
+  "run_incomplete": false,
+  "requires_review": true,
+  "measurement_start_sequence": "0",
+  "measurement_end_sequence": "0",
+  "by_type": {
+    "query": {"scheduled":"0","succeeded":"0","failed":"0","rejected":"0","pending":"0","window_completed":"0","window_succeeded":"0"},
+    "insert": {"scheduled":"0","succeeded":"0","failed":"0","rejected":"0","pending":"0","window_completed":"0","window_succeeded":"0"},
+    "upsert": {"scheduled":"1","succeeded":"0","failed":"1","rejected":"0","pending":"0","window_completed":"1","window_succeeded":"0"}
+  },
+  "engine_counters": {
+    "io_reads_submitted": "0",
+    "io_read_bytes_completed": "0",
+    "io_read_errors": "0",
+    "prefetch_submitted": "0",
+    "prefetch_consumed": "0",
+    "wal_bytes_written": "80",
+    "checkpoint_bytes_written": "0",
+    "merge_bytes_written": "0"
+  }
+}

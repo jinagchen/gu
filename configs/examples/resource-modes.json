@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "purpose": "contract_example",
+  "memory": {
+    "total_bytes": "614400000",
+    "cache_bytes": "245760000",
+    "delta_bytes": "122880000",
+    "metadata_bytes": "122880000",
+    "workspace_bytes": "92160000",
+    "reserve_bytes": "30720000"
+  },
+  "rebuild_memory": {
+    "total_bytes": "614400000",
+    "cache_bytes": "100663296",
+    "delta_bytes": "67108864",
+    "metadata_bytes": "167772160",
+    "workspace_bytes": "245301248",
+    "reserve_bytes": "33554432"
+  },
+  "resources": {
+    "max_disk_segments": 16,
+    "max_retained_generations": 2,
+    "max_retained_delta_vectors": 12288,
+    "background_workspace_bytes": "209715200",
+    "min_free_disk_bytes": "42949672960"
+  }
+}

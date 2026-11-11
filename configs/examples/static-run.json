@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "protocol_version": "EVAL-1.1",
   "purpose": "contract_example",
   "run_id": "static-contract-001",
   "dataset": {
@@ -33,6 +34,24 @@
       "workspace_bytes": "40265318",
       "reserve_bytes": "13421774"
     },
+    "rebuild_memory": null,
+    "resources": {
+      "max_disk_segments": 16,
+      "max_retained_generations": 2,
+      "max_retained_delta_vectors": 12288,
+      "background_workspace_bytes": "209715200",
+      "min_free_disk_bytes": "42949672960"
+    },
+    "read_scheduling": {
+      "demand_reserve": 8,
+      "background_reserve": 1,
+      "max_background_reads": 8,
+      "demand_burst_before_background": 8
+    },
+    "wal": {
+      "rotation_bytes": "67108864",
+      "max_frame_bytes": "1048576"
+    },
     "max_queries": 1,
     "max_pending_writes": 64,
     "max_inflight_reads": 64,
@@ -51,6 +70,7 @@
     "target_ops_per_second": 100,
     "workers": 1,
     "client_queue_capacity": 128,
+    "client_queue_bytes": "1048576",
     "query_fraction": 1.0,
     "insert_fraction": 0.0,
     "upsert_fraction": 0.0,
@@ -60,6 +80,9 @@
     "warmup_ms": "60000",
     "duration_ms": "300000",
     "drain_timeout_ms": "30000",
-    "sample_interval_ms": "1000"
+    "sample_interval_ms": "1000",
+    "result_queue_capacity": 128,
+    "result_queue_bytes": "1048576",
+    "max_record_bytes": 65536
   }
 }
