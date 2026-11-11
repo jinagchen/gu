@@ -1,12 +1,12 @@
 # C++ 接口约定
 
-契约版本 API-1.1，日期 2026 年 11 月 10 日，对应 DESIGN-1.1 [总体设计](architecture.md)。本版将 IoBackend::io_uring 替换为 windows_iocp，目标为本机 Windows；其余公开语义不变。头文件仅有声明，没有可链接引擎实现。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
+契约版本 API-1.2，日期 2026 年 11 月 11 日，对应 DESIGN-1.1 [总体设计](architecture.md)。1.1 确定 Windows IOCP；1.2 补充第三阶段 A 的 BlockReader、文件回收、预算模式、读取调度、WAL 编码与基准交接。新增 EngineOptions 字段和内部方法见 [A 侧契约](stage3-a-contract.md)。头文件仅有声明，没有可链接引擎实现。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
 
 ## 1 类型和返回值
 
 命名空间为 `agent_io`，公开声明见 [engine.hpp](../include/agent_io/engine.hpp)。
 
-`VectorId`、`Sequence`、`Generation` 都是 uint64。JSON 和 JSONL 中这些值统一使用十进制字符串，避免其他语言解析大整数时丢精度；字节数、计数和纳秒也采用十进制字符串。
+`VectorId`、`Sequence`、`Generation` 都是 uint64。JSON 和 JSONL 中这些值统一使用十进制字符串，避免其他语言解析大整数时丢精度；字节数、累计计数、数据条数和时间也采用十进制字符串。有界配置整数（维度、K、并发及队列条数等）使用 JSON 整数，逐字段规则见 [基准输出契约](benchmark-output-contract.md)。
 
 `Result<T>` 是 `std::variant<T, Error>`。成功持有 T，失败持有 Error；不返回空指针伪装成功。Error 保留项目错误码、文字、可选系统错误和写入是否可能生效。项目正常错误不以异常作为公开协议，边界捕获分配及第三方异常并转成错误；无法继续提供一致状态时停止写入或返回失败。
 
@@ -39,13 +39,15 @@ write_effect 默认 none。只有写入可能进入 WAL 后的不可确定错误
 | Stats() | Result<EngineStats> | 有界计量快照；多计数非原子一致，不能代替查询视图 |
 | Close() | Result<Success> | 停新请求、排空、报告错误；重复成功关闭幂等 |
 
-索引首次创建由独立构建程序负责，构建入口和第三方参数在依赖验证后明确。没有 `flush` 歧义：写入同步由 Insert/Upsert 保证，Checkpoint 专指数据段与清单覆盖。没有删除、事务组和历史 Search API。
+索引首次创建由独立构建程序负责，完整配置与第三方参数由第三阶段 B 补齐；A 已规定构建受限域、文件发布和资源交接要求，见 [A 侧契约](stage3-a-contract.md)。没有 `flush` 歧义：写入同步由 Insert/Upsert 保证，Checkpoint 专指数据段与清单覆盖。没有删除、事务组和历史 Search API。
 
 Get 返回的 `version` 是该向量最后修改序号，`snapshot_sequence` 是操作读取的整体快照，两者不必相同。Search 的每个版本不得大于 S，且不得存在同一 ID 的更高可见版本。
 
 ## 3 参数和预算
 
 MemoryBudget 各分区均以字节指定，总和必须等于 total_bytes；total_bytes=0 或缺必需分区不能通过 Open。分区涵盖缓存、增量、元数据、工作区和安全余量，具体用途见总体设计。
+
+API-1.2 新增 rebuild_memory（缺省 null）、ResourceLimits、ReadScheduling、WalOptions。查询/重建模式保持相同总限额；未配置 rebuild_memory 时不运行构建新段的维护。各阈值、最小工作集、切换失败与退回路径按 [A 侧契约第 3 节](stage3-a-contract.md)执行；正式分配与大规模可行性仍待实现验证。
 
 `block_bytes=4096` 是配置初值，不是平台对齐保证。direct_reads 在 Windows 映射为 FILE_FLAG_NO_BUFFERING；后端探测逻辑/物理扇区并检查地址、偏移和长度。无法满足时返回 unsupported 或 invalid_argument，调用方显式改配置后才允许 buffered 路线。io_backend 可取 synchronous 或 windows_iocp。
 
@@ -91,6 +93,9 @@ ReadRequest 持有 FileLease 和 BufferLease，校验 `block.file_id == file.Id(
 | Drain | 调用者先停止新提交；排空已接管请求和全部回调，之后才可销毁后端 |
 | WalWriter::Append | 仅写协调器调用；处理短写或报告错误，不等于持久化，不并发交错记录 |
 | WalWriter::Sync | 同步所有此前追加的数据并返回状态；组提交由上层控制 |
+| WalWriter::Rotate / Close | 组边界同步后轮换、关闭；错误后禁止通过轮换绕过恢复 |
+
+BlockReader::ReadBatch 返回按输入排序的只读 BlockLease，TryPrefetch 非阻塞准入；FileRegistry 提供持有引用后的延迟回收；ResourceGovernor 负责带生命周期的内存预约与模式切换。详细所有权、计量与失败约束见 [A 侧契约](stage3-a-contract.md)。IndexAdapter、DeltaStore、候选扩展和快照内部类型仍由 B 补齐，不能仅凭本次 A 声明宣称整个第三阶段已冻结。
 
 同步后端允许在 Submit 内完成；IOCP 后端为每个请求保留独立 OVERLAPPED，完成线程通过 GetQueuedCompletionStatus 取得结果。ReadFile 返回 ERROR_IO_PENDING 表示已接管；立即成功也须遵守默认 IOCP 完成包规则，不重复通知。初版禁止设置跳过成功完成通知的模式。同步提交失败且未接管时不等待完成包；带非空 OVERLAPPED 的失败完成仍须归还在途资源。短读不能当作完整块，对齐模式下不盲目用未对齐尾缓冲重试。
 

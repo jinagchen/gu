@@ -1,6 +1,6 @@
 # C++ 基准与 Python 评测协议
 
-协议版本 EVAL-1，日期 2026 年 11 月 10 日。对应 DESIGN-1.1 与 REQ-1.0，当前执行平台为本机 Windows；正式 CLI 尚未实现。
+协议版本 EVAL-1.1，日期 2026 年 11 月 11 日。对应 DESIGN-1.1、API-1.2 与 REQ-1.0，当前执行平台为本机 Windows；正式 CLI 尚未实现。新增 A 生产端的字段、守恒、错误和有界输出约束见 [基准输出字段契约](benchmark-output-contract.md)；B 的构建配置、动态输入轨迹及独立答案仍待补齐。
 
 本次仅交付协议和示例文件，未实现下列命令。示例结果是用于检查字段与逻辑的一条合成数据，不是测得的吞吐、召回或延迟。
 
@@ -14,7 +14,7 @@ vector_bench --config <run.json> --output <new-run-directory>
 python -m evaluation.check --run <run-directory>
 ```
 
-这些命令是待实现入口；构建配置待依赖固定后补充，不提供一个假装可执行的空工具。输出目录必须是新目录，已有结果不默认覆盖。
+这些命令是待实现入口；构建配置由第三阶段 B 补充。A 已规定构建受限域、发布与资源交接要求，见 [A 侧契约](stage3-a-contract.md)。输出目录必须是新目录，已有结果不默认覆盖。
 
 基准程序退出码约定：0 表示请求执行完成并写出完整协议工件，2 为配置错误，3 为环境或依赖不支持，4 为运行错误，5 为工件不完整。退出 0 不代表 Recall 达标，召回与资源验收由 Python 检查给结论；有失败请求时结果必须显式标记。
 
@@ -28,7 +28,8 @@ python -m evaluation.check --run <run-directory>
 
 全局 JSON 规则：
 
-- schema_version 为整数 1；ID、序号、代次、字节数、计数、纳秒和持续毫秒为十进制字符串。
+- schema_version 为整数 1，protocol_version 为 EVAL-1.1；ID、序号、代次、字节数、累计计数、数据条数、纳秒和持续毫秒为十进制字符串。
+- dimension、block_bytes、k、candidate_limit、prefetch_blocks、并发/队列条数、资源条数和调度次数为有界 JSON 整数，不能使用布尔代替。WalOptions 的 max_frame_bytes 虽在 C++ 为 uint32，JSON 仍按字节字符串编码；完整字段表见 [输出契约](benchmark-output-contract.md)。
 - 布尔类型不能以字符串替代；距离为有限 JSON 数值，不允许 NaN 或 Infinity。
 - 路径相对配置文件解析并记录最终绝对路径，结果工件之间采用运行目录内相对路径。
 - 所有输入文件须有内容校验。示例的 sha256=null 必须配合 purpose=contract_example；正式运行不允许 null，运行前由数据准备填入真实哈希。
@@ -101,7 +102,7 @@ EngineStats 计数是实例累计值，基准从测量起止差值得到窗口�
 
 ## 6 查询与答案工件
 
-[查询示例](../evaluation/examples/queries.jsonl) 与 [精确答案示例](../evaluation/examples/ground-truth.jsonl) 按 `(operation_id, query_id, snapshot_sequence)` 连接。每条查询保存状态、快照和计时；未进入引擎的拒绝请求可用 snapshot_sequence=null，计失败，不计算伪造答案。
+[查询示例](../evaluation/examples/queries.jsonl) 与 [精确答案示例](../evaluation/examples/ground-truth.jsonl) 按 `(operation_id, query_id, snapshot_sequence)` 连接。每条查询保存状态、快照和计时；未进入引擎的拒绝请求使用 snapshot_sequence/view_generation/api_start_ns=null，计失败，不计算伪造答案。已调用 API 但失败时现有 Error 无快照，snapshot_sequence/view_generation 同样为 null，api_start_ns 保留真实值。
 
 本次合成示例使用 S=0、10 条有效数据、K=10，并列规则为距离后 ID。返回 ID 0 至 9，版本全为 0；答案给出同一组 ID，独立计算应得到 Recall@10=1。距离仅用于示例协议检查，不是从真实向量测得。
 

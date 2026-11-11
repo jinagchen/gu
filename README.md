@@ -16,6 +16,7 @@
 - [C++ 接口约定](docs/interface-contract.md)：公开 API、错误、准入、所有权和内部读取契约。
 - [存储格式与恢复](docs/storage-protocol.md)：WAL 字节布局、清单、发布与恢复时序。
 - [评测协议](docs/evaluation-protocol.md)：C++/Python 边界、快照答案、时间与结果工件。
+- [第三阶段 A 交付](docs/stage3-a-completion.md)：API-1.2 读取/资源/WAL 声明、预算切换及 EVAL-1.1 基准输出与自检；B 侧及联合复核仍待完成。
 
 公开声明位于 [engine.hpp](include/agent_io/engine.hpp) 和 [storage.hpp](include/agent_io/storage.hpp)，目前仅有声明，不能链接成引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
