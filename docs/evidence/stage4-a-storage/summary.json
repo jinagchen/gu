@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "purpose": "stage4_a_storage_integration_only",
+  "fixture_directory": "D:\\agent-io-stage2\\20261110",
+  "output_directory": "C:\\Users\\\u5c06\u81e3\\Desktop\\\u4e2a\u4eba\\\u64cd\u4f5c\u7cfb\u7edf\u6bd4\u8d5b\\runs\\stage4-a-storage-final-20261112",
+  "vector_count": 4096,
+  "dimension": 32,
+  "query_count": 128,
+  "recall_at_10": [
+    1.0,
+    1.0
+  ],
+  "reload_identical": true,
+  "adapter_failure_propagated": true,
+  "prior_probe_results_identical": true,
+  "memory": [
+    {
+      "schema_version": 1,
+      "limit_commit_bytes": 134217728,
+      "kernel_peak_job_commit_bytes": 11251712,
+      "sampled_peak_private_bytes": 11165696,
+      "sampled_peak_working_set_bytes": 13885440,
+      "total_processes": 2,
+      "sample_interval_ms": 5,
+      "elapsed_ms": 1984,
+      "timed_out": false,
+      "exit_code": 0
+    },
+    {
+      "schema_version": 1,
+      "limit_commit_bytes": 134217728,
+      "kernel_peak_job_commit_bytes": 11227136,
+      "sampled_peak_private_bytes": 11227136,
+      "sampled_peak_working_set_bytes": 14225408,
+      "total_processes": 2,
+      "sample_interval_ms": 5,
+      "elapsed_ms": 1969,
+      "timed_out": false,
+      "exit_code": 0
+    }
+  ],
+  "input_sha256": {
+    "base.bin": "8fe7a0da6e00f941b6b3fd5e88acff479479d171422204808ff1f2c4cc54d3f8",
+    "queries.bin": "a24a6f0f65be0c05cf9971283f782ef711d04377ea5f6405fc8b42e57398a235",
+    "index_disk.index": "cc8b644d52cb5e12e29b5fb5382b7be2656f726f972843b78f162d513ae2ff69"
+  },
+  "source_sha256": {
+    "CMakeLists.txt": "c004b6654d3d6b5ecea51eb79d2348659b62aa6ef1605eef50493941e5f60587",
+    "include/agent_io/synchronous_storage.hpp": "55bc55aecf23a8fb8dcee9b0c7bcada00aff7ed70263122475bd854a6ce021c0",
+    "src/storage/synchronous_storage.cpp": "79c4b8dd5f829f5b065a43c1db6f2996a7854beaa546e216237676241e6fc232",
+    "src/storage/synchronous_block_reader.cpp": "4bf507c87afcb27912bed0a4ba8097155680460609e2b6d23020282ead4431f1",
+    "tests/storage/synchronous-storage-test.cpp": "ef33f8a1fc00829137b0da051ce034af25dd2a5efd9a8884f81e948f5e00ec00",
+    "tools/environment/diskann-probe.cpp": "f5c8c359b32eb76c77f6a387441e3e13b223120f8b7b5d222ec468aa0295ee43",
+    "tools/storage/check-synchronous-storage.py": "eb2e1cc4e474d8b599ffa97c253c61195c07e09f157401843ff7d7fc41fac2da"
+  },
+  "binary_sha256": {
+    "diskann_probe.exe": "83a80b59e54403eba87606fbb69aa06aad972dd44c98f86b9196b06de7612e88",
+    "job_runner.exe": "ab6686a2332b4c874afcdddd6a18e714817c34632ddf40e5fdf76a96920ec034"
+  },
+  "artifact_sha256": {
+    "failure-memory.json": "7085a292178a7bd43c26d1b5e0101536605a0ef31f057603fc1ffb8a6ae3e042",
+    "failure.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "injected-failure.log": "0ba53c4eac18b3cd5e99f5ca8c300d455d0d9b0efc80909fb1e5765fffe554ee",
+    "memory-0.json": "1007c264754e7837b7c9b47ad1ad4bd2ddb25b42008854cc595857074cc48aa9",
+    "memory-1.json": "51faceceb1ca137df985b0ce24bb50d789867e8da4aa66b5bf126131ce281200",
+    "query-0.log": "841f173580bd299649add6964d46136ceb618e220b00559e2a826ff5fa3bf9b8",
+    "query-1.log": "4ec4915473f612a8b9ad9cef1a096f77d10e36cb5682ac193e8069264f34787d",
+    "results-0.jsonl": "747e60f7803d505e0678f47e05baf583e30ef85985a62d2f24ada49a3b07b06e",
+    "results-1.jsonl": "747e60f7803d505e0678f47e05baf583e30ef85985a62d2f24ada49a3b07b06e"
+  },
+  "limits": [
+    "Synthetic small-data storage integration, not formal Engine/EVAL acceptance.",
+    "PQ and upstream scratch allocations are outside this adapter's internal governor.",
+    "Job commit and sampled working set do not prove the official physical-memory rule.",
+    "Adapter failure injection is separate from the C++ test's real ReadFile failure."
+  ]
+}

@@ -18,7 +18,9 @@
 - [评测协议](docs/evaluation-protocol.md)：C++/Python 边界、快照答案、时间与结果工件。
 - [第三阶段 A 交付](docs/stage3-a-completion.md)：API-1.2 读取/资源/WAL 声明、预算切换及 EVAL-1.1 基准输出与自检；B 侧及联合复核仍待完成。
 
-公开声明位于 [engine.hpp](include/agent_io/engine.hpp) 和 [storage.hpp](include/agent_io/storage.hpp)，目前仅有声明，不能链接成引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
+公开声明位于 [engine.hpp](include/agent_io/engine.hpp) 和 [storage.hpp](include/agent_io/storage.hpp)。Engine 仍只有声明，同步存储已有独立实现，尚不能链接成完整引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
+
+2026 年 11 月 12 日开始第四阶段 A：已新增可链接的 `agent_io_storage` 静态库，实现同步读取、文件/缓冲租约、预算预约和关闭缓存/预取的批读取，并接入现有 DiskANN 小数据探针。两次独立精确答案检查 Recall@10 均为 1.0。Engine、正式基准程序及第四阶段整体验收仍未完成，范围和命令见[同步存储交接记录](docs/stage4-a-storage.md)。
 
 ## 两人分工
 
@@ -82,7 +84,7 @@ cmake --build build/windows --config Release
 ctest --test-dir build/windows -C Release -V
 ```
 
-当前命令构建并验证环境与内存探针，不会产生完整 Engine。普通终端若无法找到 cmake，使用[环境记录中的随附工具路径](docs/environment-validation.md)。
+当前命令构建同步存储库并验证存储、环境与内存探针，不会产生完整 Engine。普通终端若无法找到 cmake，使用[环境记录中的随附工具路径](docs/environment-validation.md)。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
 
