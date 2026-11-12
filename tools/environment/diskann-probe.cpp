@@ -1,10 +1,12 @@
-#include "agent_io/storage.hpp"
+#include "agent_io/synchronous_storage.hpp"
 #include "pq_flash_index.h"
 
 #include <windows.h>
 #include <psapi.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <mutex>
@@ -24,103 +26,62 @@ std::size_t PrivateBytes() {
     return memory.PrivateUsage;
 }
 
-class ProbeFile final : public FileLease {
-public:
-    HANDLE handle = INVALID_HANDLE_VALUE;
-    std::uint64_t size = 0;
-    explicit ProbeFile(const std::string& path) {
-        handle = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                             OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) throw std::runtime_error("Open graph failed");
-        LARGE_INTEGER length{};
-        if (!GetFileSizeEx(handle, &length)) {
-            CloseHandle(handle);
-            handle = INVALID_HANDLE_VALUE;
-            throw std::runtime_error("Graph size failed");
-        }
-        size = static_cast<std::uint64_t>(length.QuadPart);
-    }
-    ~ProbeFile() override { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
-    FileId Id() const noexcept override { return 1; }
-    std::uint64_t SizeBytes() const noexcept override { return size; }
-};
-
-// Borrowed DiskANN storage is safe here because Submit completes synchronously.
-class ProbeBuffer final : public BufferLease {
-    std::span<std::byte> bytes_;
-public:
-    ProbeBuffer(void* bytes, std::size_t count)
-        : bytes_(static_cast<std::byte*>(bytes), count) {}
-    std::span<std::byte> WritableBytes() noexcept override { return bytes_; }
-    std::span<const std::byte> Bytes() const noexcept override { return bytes_; }
-};
-
-class ProbeBackend final : public ReadBackend {
-    std::mutex mutex_;
-public:
-    std::uint64_t reads = 0, bytes = 0;
-    bool fail = false;
-    Result<Success> Submit(ReadRequest request, ReadCallback callback) override {
-        const auto file = std::dynamic_pointer_cast<const ProbeFile>(request.file);
-        if (!file || !request.buffer || request.buffer->Bytes().size() < request.block.byte_count)
-            return Error{ErrorCode::invalid_argument, "Invalid probe request"};
-        if (fail) return Error{ErrorCode::io_error, "Injected reader submission failure"};
-        DWORD completed = 0;
-        LARGE_INTEGER offset{};
-        offset.QuadPart = static_cast<LONGLONG>(request.block.aligned_offset);
-        bool success;
-        DWORD error;
-        {
-            std::lock_guard lock(mutex_);
-            success = SetFilePointerEx(file->handle, offset, nullptr, FILE_BEGIN) &&
-                ReadFile(file->handle, request.buffer->WritableBytes().data(),
-                         request.block.byte_count, &completed, nullptr);
-            error = GetLastError();
-            ++reads;
-            bytes += completed;
-        }
-        if (!success || completed != request.block.byte_count) {
-            callback(Error{ErrorCode::io_error, "Graph read failed or short",
-                           static_cast<int>(error)});
-        } else {
-            callback(ReadCompletion{request.request_id, completed});
-        }
-        return Success{};
-    }
-    Result<Success> Drain() override { return Success{}; }
-};
+template<class T> T Take(Result<T> result) {
+    if (const auto* error = std::get_if<Error>(&result))
+        throw std::runtime_error(error->message + "; system_error=" +
+                                 std::to_string(error->system_error));
+    return std::get<T>(std::move(result));
+}
 
 class ProbeReader final : public AlignedFileReader {
     IOContext context_;
-    std::shared_ptr<ProbeFile> file_;
-    RequestId next_ = 0;
+    // Only this adapter's storage allocations are governed here. DiskANN PQ,
+    // scratch and the process still require the external Job measurements.
+    std::shared_ptr<ResourceGovernor> governor_ = Take(CreateResourceGovernor(
+        {16777216, 2097152, 2097152, 2097152, 8388608, 2097152}));
+    std::unique_ptr<FileRegistry> registry_ = Take(CreateSynchronousFileRegistry(governor_));
+    std::shared_ptr<SynchronousReadBackend> native_backend_ =
+        Take(CreateSynchronousReadBackend(governor_));
+    std::unique_ptr<BlockReader> blocks_ =
+        Take(CreateSynchronousBlockReader(governor_, native_backend_));
+    std::shared_ptr<const FileLease> file_;
 public:
-    ProbeBackend backend;
+    struct Counters {
+        std::uint64_t reads = 0, bytes = 0;
+        bool fail = false;
+    } backend;
     IOContext& get_ctx() override { return context_; }
     void register_thread() override {}
     void deregister_thread() override {}
     void deregister_all_threads() override {}
     void open(const std::string& path) override {
-        file_ = std::make_shared<ProbeFile>(path);
+        file_ = Take(registry_->Open(path));
         std::fprintf(stderr, "probe_reader_open=pass\n");
     }
     void close() override { file_.reset(); }
     void read(std::vector<AlignedRead>& requests, IOContext&, bool = false) override {
-        for (const auto& request : requests) {
-            if (request.len > (std::numeric_limits<std::uint32_t>::max)())
-                throw std::runtime_error("Read exceeds DWORD");
-            ReadRequest read{
-                ++next_, {1, request.offset, static_cast<std::uint32_t>(request.len)},
-                ReadPriority::demand, file_,
-                std::make_shared<ProbeBuffer>(request.buf, static_cast<std::size_t>(request.len))};
-            bool completed = false;
-            std::string failure;
-            auto submitted = backend.Submit(std::move(read), [&](Result<ReadCompletion> result) {
-                completed = true;
-                if (auto* error = std::get_if<Error>(&result)) failure = error->message;
-            });
-            if (auto* error = std::get_if<Error>(&submitted)) throw std::runtime_error(error->message);
-            if (!completed || !failure.empty()) throw std::runtime_error("Read completion: " + failure);
+        if (!file_) throw std::runtime_error("Read before graph open");
+        if (backend.fail) throw std::runtime_error("Injected reader submission failure");
+        for (std::size_t offset = 0; offset < requests.size(); offset += 64) {
+            const auto count = (std::min)(std::size_t{64}, requests.size() - offset);
+            std::vector<BlockLocation> locations;
+            locations.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto& request = requests[offset + i];
+                if (request.len > (std::numeric_limits<std::uint32_t>::max)())
+                    throw std::runtime_error("Read exceeds DWORD");
+                locations.push_back({{file_->Id(), request.offset,
+                    static_cast<std::uint32_t>(request.len)}, file_});
+            }
+            const auto leases = Take(blocks_->ReadBatch(locations,
+                {ReadPriority::demand, std::chrono::steady_clock::now() +
+                    std::chrono::seconds(30)}));
+            for (std::size_t i = 0; i < count; ++i)
+                std::memcpy(requests[offset + i].buf, leases[i]->Bytes().data(),
+                            leases[i]->Bytes().size());
+            const auto stats = native_backend_->Stats();
+            backend.reads = stats.io_reads_submitted;
+            backend.bytes = stats.io_read_bytes_completed;
         }
     }
 };
@@ -168,6 +129,7 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(concrete->backend.reads - before_reads),
                     static_cast<unsigned long long>(concrete->backend.bytes - before_bytes), count);
         std::puts("read_path=DiskANN_AlignedFileReader_to_agent_io_ReadBackend; direct_reads=true");
+        std::puts("storage_implementation=agent_io_storage; block_reader=cache_disabled");
         if (argc == 5 && std::string(argv[4]) == "hold") {
             const std::string ready = std::string(argv[3]) + ".ready";
             const std::string release = std::string(argv[3]) + ".release";

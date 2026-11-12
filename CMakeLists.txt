@@ -8,6 +8,18 @@ endif()
 add_library(agent_io_contracts OBJECT tools/contracts/header-smoke.cpp)
 target_compile_features(agent_io_contracts PRIVATE cxx_std_20)
 
+add_library(agent_io_storage STATIC
+    src/storage/synchronous_storage.cpp src/storage/synchronous_block_reader.cpp)
+target_include_directories(agent_io_storage PUBLIC include)
+target_compile_features(agent_io_storage PUBLIC cxx_std_20)
+target_compile_definitions(agent_io_storage PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+
+add_executable(synchronous_storage_test tests/storage/synchronous-storage-test.cpp)
+target_link_libraries(synchronous_storage_test PRIVATE agent_io_storage)
+target_compile_definitions(synchronous_storage_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+
 add_executable(windows_environment_probe tools/environment/windows-probe.cpp)
 target_compile_features(windows_environment_probe PRIVATE cxx_std_20)
 target_compile_definitions(windows_environment_probe PRIVATE
@@ -20,12 +32,15 @@ target_compile_definitions(job_runner PRIVATE
 target_link_libraries(job_runner PRIVATE psapi)
 
 if(MSVC)
-    foreach(target agent_io_contracts windows_environment_probe job_runner)
+    foreach(target agent_io_contracts agent_io_storage synchronous_storage_test
+                   windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
 endif()
 
 enable_testing()
+add_test(NAME synchronous_storage COMMAND synchronous_storage_test)
+set_tests_properties(synchronous_storage PROPERTIES TIMEOUT 30)
 add_test(NAME windows_environment_probe COMMAND windows_environment_probe)
 set_tests_properties(windows_environment_probe PROPERTIES TIMEOUT 20)
 add_test(NAME job_process_tree COMMAND job_runner 64 10
@@ -48,7 +63,7 @@ if(AGENT_IO_DISKANN_ROOT)
         "${AGENT_IO_DISKANN_PACKAGES}/boost/lib/native/include"
         "${AGENT_IO_DISKANN_PACKAGES}/intelopenmp.devel.win/lib/native/include")
     target_link_libraries(diskann_probe PRIVATE
-        "${AGENT_IO_DISKANN_ROOT}/x64/Release/diskann.lib" psapi)
+        agent_io_storage "${AGENT_IO_DISKANN_ROOT}/x64/Release/diskann.lib" psapi)
     foreach(runtime diskann.dll libiomp5md.dll)
         add_custom_command(TARGET diskann_probe POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
