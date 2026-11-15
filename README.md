@@ -20,7 +20,9 @@
 
 公开声明位于 [engine.hpp](include/agent_io/engine.hpp) 和 [storage.hpp](include/agent_io/storage.hpp)。Engine 仍只有声明，同步存储已有独立实现，尚不能链接成完整引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
-2026 年 11 月 12 日开始第四阶段 A：已新增可链接的 `agent_io_storage` 静态库，实现同步读取、文件/缓冲租约、预算预约和关闭缓存/预取的批读取，并接入现有 DiskANN 小数据探针。两次独立精确答案检查 Recall@10 均为 1.0。Engine、正式基准程序及第四阶段整体验收仍未完成，范围和命令见[同步存储交接记录](docs/stage4-a-storage.md)。
+2026 年 11 月 12 日开始第四阶段 A：已新增可链接的 `agent_io_storage` 静态库，实现同步读取、文件/缓冲租约、预算预约和关闭缓存/预取的批读取，并接入现有 DiskANN 小数据探针。两次独立精确答案检查 Recall@10 均为 1.0，范围和命令见[同步存储交接记录](docs/stage4-a-storage.md)。
+
+2026 年 11 月 15 日补齐 A 侧静态 C++ 并发基准运行器：`agent_io_benchmark`、`vector_bench` 的有界队列/结果槽、独立日志、阶段计时、吞吐与延迟直方图、资源采样及 EVAL-1.1 工件输出。显式 `contract-test` 目标验证生产端，拒绝正式 measurement；真实 Engine 目标仍待 B 接入，第四阶段整体验收尚未完成。命令与接入边界见[基准交付记录](docs/stage4-a-benchmark.md)。
 
 ## 两人分工
 
@@ -42,16 +44,17 @@
 
 ## 计划目录
 
-以下为目标结构。CMake 已可构建接口检查、Windows 环境探针、Job Object 启动器及可选 DiskANN 读取适配探针；include/agent_io 已有接口声明，configs/examples 与 evaluation/examples 已有协议示例；引擎实现及正式命令尚未完成。
+以下为目标结构。CMake 已可构建存储与基准库、相应测试、接口检查、Windows 环境探针、Job Object 启动器及可选 DiskANN 读取适配探针。已有固定 Boost 头文件时还构建 vector_bench；真实引擎、首次构建和正式评测入口尚未完成。
 
 ```text
 CMakeLists.txt
 include/agent_io/     核心公开接口
 src/storage/          同步读写、块格式和后续 Windows IOCP 后端
+src/benchmark/        静态开放式并发基准运行器
 src/cache/            固定容量缓存、准入和在途读取去重
 src/index/            检索与增量索引适配
 src/update/           WAL、版本信息和后台合并
-tools/                已有环境探针和接口检查；后续增加命令行与基准
+tools/                环境探针、接口检查、基准 CLI 与生产端集成检查
 tests/                核心正确性、恢复和并发测试
 evaluation/           Python 数据处理、实验编排和结果分析
 configs/              可复现实验配置
@@ -84,7 +87,7 @@ cmake --build build/windows --config Release
 ctest --test-dir build/windows -C Release -V
 ```
 
-当前命令构建同步存储库并验证存储、环境与内存探针，不会产生完整 Engine。普通终端若无法找到 cmake，使用[环境记录中的随附工具路径](docs/environment-validation.md)。
+当前命令构建同步存储及并发基准，验证存储、基准、环境与内存探针，不会产生完整 Engine。普通终端若无法找到 cmake，使用[环境记录中的随附工具路径](docs/environment-validation.md)。CLI 的协议验证命令见[基准交付记录](docs/stage4-a-benchmark.md)。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
 

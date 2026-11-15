@@ -1,0 +1,22 @@
+[OUTPUT]
+Internal ctest changing into directory: C:/Users/将臣/Desktop/个人/操作系统比赛/build/windows
+
+[HANDLER_OUTPUT]
+Test project C:/Users/将臣/Desktop/个人/操作系统比赛/build/windows
+
+    Start 1: benchmark_runner
+1/6 Test #1: benchmark_runner .................   Passed    0.89 sec
+    Start 2: benchmark_cli
+2/6 Test #2: benchmark_cli ....................   Passed    3.54 sec
+    Start 3: synchronous_storage
+3/6 Test #3: synchronous_storage ..............   Passed    0.14 sec
+    Start 4: windows_environment_probe
+4/6 Test #4: windows_environment_probe ........   Passed    0.06 sec
+    Start 5: job_process_tree
+5/6 Test #5: job_process_tree .................   Passed    0.30 sec
+    Start 6: job_commit_rejection
+6/6 Test #6: job_commit_rejection .............   Passed    0.12 sec
+
+100% tests passed, 0 tests failed out of 6
+
+Total Test time (real) =   5.08 sec

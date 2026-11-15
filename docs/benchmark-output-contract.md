@@ -117,6 +117,8 @@ environment.json 须记录 job_limit_commit_bytes、sample_interval_ms、测量�
 
 ## 7 可执行自检与 B 的后续工作
 
+2026 年 11 月 15 日已新增静态 C++ 生产端和实际输出检查，见[基准交付记录](stage4-a-benchmark.md)。运行 `tools/benchmark/check-benchmark.py --output <new-directory>` 会调用 C++ CLI 并验证生成工件；合成目标不代表真实 Engine 或召回验收。下面两条命令继续检查原始协议样例。
+
 从仓库根目录执行：
 
 ```powershell

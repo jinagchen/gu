@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "purpose": "stage4_a_benchmark_producer_only",
+  "checked_at": "2026-11-15T16:46:27.889659+08:00",
+  "output_directory": "C:\\Users\\\u5c06\u81e3\\Desktop\\\u4e2a\u4eba\\\u64cd\u4f5c\u7cfb\u7edf\u6bd4\u8d5b\\build\\windows\\benchmark-cli-Debug\\producer-l6x0yjs9",
+  "cases": {
+    "normal": {
+      "counts": {
+        "scheduled": "20",
+        "succeeded": "20",
+        "failed": "0",
+        "rejected": "0",
+        "pending": "0",
+        "window_completed": "18",
+        "window_succeeded": "18"
+      },
+      "exit_code": 0,
+      "resources": {
+        "client_slots": 128,
+        "result_slots": 15,
+        "workspace_bytes": "1144984"
+      },
+      "window_completed_qps": 90.0,
+      "drained_qps": 91.92971972926698,
+      "job_limit_commit_bytes": "134217728",
+      "job_memory": {
+        "schema_version": 1,
+        "limit_commit_bytes": 134217728,
+        "kernel_peak_job_commit_bytes": 3747840,
+        "sampled_peak_private_bytes": 3743744,
+        "sampled_peak_working_set_bytes": 15958016,
+        "total_processes": 2,
+        "sample_interval_ms": 5,
+        "elapsed_ms": 359,
+        "timed_out": false,
+        "exit_code": 0
+      }
+    },
+    "repeat": {
+      "counts": {
+        "scheduled": "20",
+        "succeeded": "20",
+        "failed": "0",
+        "rejected": "0",
+        "pending": "0",
+        "window_completed": "17",
+        "window_succeeded": "17"
+      },
+      "exit_code": 0,
+      "resources": {
+        "client_slots": 128,
+        "result_slots": 15,
+        "workspace_bytes": "1144984"
+      },
+      "window_completed_qps": 85.0,
+      "drained_qps": 92.15511179797387,
+      "job_limit_commit_bytes": "134217728",
+      "job_memory": {
+        "schema_version": 1,
+        "limit_commit_bytes": 134217728,
+        "kernel_peak_job_commit_bytes": 3727360,
+        "sampled_peak_private_bytes": 3723264,
+        "sampled_peak_working_set_bytes": 15937536,
+        "total_processes": 2,
+        "sample_interval_ms": 5,
+        "elapsed_ms": 329,
+        "timed_out": false,
+        "exit_code": 0
+      }
+    },
+    "api-errors": {
+      "counts": {
+        "scheduled": "20",
+        "succeeded": "14",
+        "failed": "6",
+        "rejected": "0",
+        "pending": "0",
+        "window_completed": "20",
+        "window_succeeded": "14"
+      },
+      "exit_code": 0,
+      "resources": {
+        "client_slots": 128,
+        "result_slots": 15,
+        "workspace_bytes": "1144984"
+      },
+      "window_completed_qps": 70.0,
+      "drained_qps": 65.2991165962369,
+      "job_limit_commit_bytes": "134217728",
+      "job_memory": {
+        "schema_version": 1,
+        "limit_commit_bytes": 134217728,
+        "kernel_peak_job_commit_bytes": 3723264,
+        "sampled_peak_private_bytes": 3723264,
+        "sampled_peak_working_set_bytes": 15921152,
+        "total_processes": 2,
+        "sample_interval_ms": 5,
+        "elapsed_ms": 281,
+        "timed_out": false,
+        "exit_code": 0
+      }
+    },
+    "api-timeouts": {
+      "counts": {
+        "scheduled": "10",
+        "succeeded": "0",
+        "failed": "10",
+        "rejected": "0",
+        "pending": "0",
+        "window_completed": "8",
+        "window_succeeded": "0"
+      },
+      "exit_code": 0,
+      "resources": {
+        "client_slots": 128,
+        "result_slots": 15,
+        "workspace_bytes": "1144984"
+      },
+      "window_completed_qps": 0.0,
+      "drained_qps": 0.0,
+      "job_limit_commit_bytes": "134217728",
+      "job_memory": {
+        "schema_version": 1,
+        "limit_commit_bytes": 134217728,
+        "kernel_peak_job_commit_bytes": 3723264,
+        "sampled_peak_private_bytes": 3723264,
+        "sampled_peak_working_set_bytes": 15908864,
+        "total_processes": 2,
+        "sample_interval_ms": 5,
+        "elapsed_ms": 203,
+        "timed_out": false,
+        "exit_code": 0
+      }
+    },
+    "client-overload": {
+      "counts": {
+        "scheduled": "6",
+        "succeeded": "3",
+        "failed": "0",
+        "rejected": "3",
+        "pending": "0",
+        "window_completed": "4",
+        "window_succeeded": "1"
+      },
+      "exit_code": 0,
+      "resources": {
+        "client_slots": 1,
+        "result_slots": 15,
+        "workspace_bytes": "1125616"
+      },
+      "window_completed_qps": 3.3333333333333335,
+      "drained_qps": 5.90272080012561,
+      "job_limit_commit_bytes": "134217728",
+      "job_memory": {
+        "schema_version": 1,
+        "limit_commit_bytes": 134217728,
+        "kernel_peak_job_commit_bytes": 3645440,
+        "sampled_peak_private_bytes": 3645440,
+        "sampled_peak_working_set_bytes": 15896576,
+        "total_processes": 2,
+        "sample_interval_ms": 5,
+        "elapsed_ms": 594,
+        "timed_out": false,
+        "exit_code": 0
+      }
+    },
+    "drain-timeout": {
+      "counts": {
+        "scheduled": "20",
+        "succeeded": "0",
+        "failed": "0",
+        "rejected": "0",
+        "pending": "20",
+        "window_completed": "0",
+        "window_succeeded": "0"
+      },
+      "exit_code": 4,
+      "resources": {
+        "client_slots": 128,
+        "result_slots": 15,
+        "workspace_bytes": "1136792"
+      },
+      "window_completed_qps": 0.0,
+      "drained_qps": 0.0,
+      "job_limit_commit_bytes": "134217728",
+      "job_memory": {
+        "schema_version": 1,
+        "limit_commit_bytes": 134217728,
+        "kernel_peak_job_commit_bytes": 3645440,
+        "sampled_peak_private_bytes": 3645440,
+        "sampled_peak_working_set_bytes": 15872000,
+        "total_processes": 2,
+        "sample_interval_ms": 5,
+        "elapsed_ms": 125,
+        "timed_out": false,
+        "exit_code": 4
+      }
+    },
+    "engine-unavailable": {
+      "expected_exit_code": 3
+    },
+    "measurement-refused": {
+      "expected_exit_code": 3
+    },
+    "unknown-field": {
+      "expected_exit_code": 2
+    },
+    "boolean-integer": {
+      "expected_exit_code": 2
+    },
+    "noncanonical-u64": {
+      "expected_exit_code": 2
+    },
+    "missing-rejection-slot": {
+      "expected_exit_code": 2
+    },
+    "undersized-record": {
+      "expected_exit_code": 2
+    },
+    "duplicate-key": {
+      "expected_exit_code": 2
+    },
+    "escaped-duplicate": {
+      "expected_exit_code": 2
+    },
+    "nested-duplicate": {
+      "expected_exit_code": 2
+    },
+    "nan": {
+      "expected_exit_code": 2
+    },
+    "infinity": {
+      "expected_exit_code": 2
+    },
+    "trailing-content": {
+      "expected_exit_code": 2
+    },
+    "existing-output-protected": {
+      "expected_exit_code": 2
+    }
+  },
+  "source_sha256": {
+    "CMakeLists.txt": "58acfb67d365b915b551560381249fbecbfab0fa7e4fb9ff4c7843e322b3bd49",
+    "include/agent_io/benchmark.hpp": "0fbd899469f9cffb511f025f78ed38360526a637c0c34321d73ae3540bbbd637",
+    "include/agent_io/benchmark_runner.hpp": "3aaf0475c60651c8d5155f5636ce0c66f749f0da58af00a1c48e418e706b4527",
+    "src/benchmark/runner.cpp": "1c3d9e7e68867a2375f3175a7ff719a8e0fb63d600a2b39785117d3a4b451fbd",
+    "tools/benchmark/main.cpp": "19f7b9c33e5cb268a938fa88385bb9b02248cb7ad75e2f46d647d10c5346282e",
+    "tools/benchmark/config.hpp": "b3b0f08d37a09e736392b741db9cfa1593010873a7d2be19ce450e288b2e2356",
+    "tools/benchmark/config.cpp": "15a39dd14bf22388547cf64c534fc7e785c139ec26839d9b006730aeb6fe4ab3",
+    "tools/benchmark/boost-json.cpp": "875b934eeb6ba32b8e340a7122e192f0d16c6ad605e3d8e5d1e111a2df0dfb21",
+    "tests/benchmark/benchmark-runner-test.cpp": "4fd23e9a55b416dbb825dd5729cefcefcac0176e837e70460e785e6306bc8e28",
+    "tools/benchmark/check-benchmark.py": "7dc2283ae86a30934eaafaec168a0889b1da07c3b610374b6bb3cb326b834463",
+    "configs/examples/benchmark-contract-test.json": "5a8b4863e1c35d880755bc05e25020c8187b59875c6302c94b0882458d0035b1"
+  },
+  "binary_sha256": {
+    "vector_bench.exe": "bd956f5c02fdf34a20951dad6d75d1f53e91b8497304cd4d1973d9dfa161adef",
+    "job_runner.exe": "389a831e9635fc79c4580a1d57f96cf16e8553a2339e7080956f9176fba8fe02"
+  },
+  "limitations": [
+    "Synthetic target validates the producer, not retrieval, recall or Engine integration.",
+    "The existing EVAL-1.1 checker validates actual emitted query/counter/sample artifacts.",
+    "Job commit limits are not an official physical-memory compliance result."
+  ]
+}

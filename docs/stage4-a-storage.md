@@ -45,4 +45,4 @@ $ctestExe = Join-Path (Split-Path $cmakeExe) 'ctest.exe'
 
 B 可使用 `ReadBatch` 的只读块租约对接 IndexAdapter，先明确原生节点映射、读取批次与 scratch 上界；不能保存脱离租约的裸 span。新接口由 `agent_io_storage` 导出，使用 CMake `target_link_libraries(... PRIVATE agent_io_storage)`。
 
-A 后续继续正式 C++ 并发基准的有界队列、计时与 EVAL-1.1 输出；B 补首次构建工件、正式 IndexAdapter 和独立评测。双方集成后才能验收第四阶段完整同步 Engine。缓存/IOCP/预取、WAL 实现和动态恢复分别在后续对应阶段推进。
+2026 年 11 月 15 日，A 已实现静态 C++ 并发基准的有界队列、计时与 EVAL-1.1 输出，见[基准交付记录](stage4-a-benchmark.md)。B 仍须补首次构建工件、正式 IndexAdapter 和独立评测，并接入真实查询目标；双方集成后才能验收第四阶段完整同步 Engine。缓存/IOCP/预取、WAL 实现和动态恢复分别在后续对应阶段推进。

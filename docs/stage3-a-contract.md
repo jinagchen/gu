@@ -126,7 +126,7 @@ B 对已同步组的发布必须不再分配；operation_id 只用于基准关�
 
 ## 5 C++ 基准的生产端
 
-值类型见 [benchmark.hpp](../include/agent_io/benchmark.hpp)，字段见 [基准输出协议](benchmark-output-contract.md)。正式 vector_bench 尚未实现。
+值类型见 [benchmark.hpp](../include/agent_io/benchmark.hpp)，字段见 [基准输出协议](benchmark-output-contract.md)。本契约制定时尚未实现 vector_bench；2026 年 11 月 15 日已交付静态运行器与 CLI，真实 Engine 接入仍待完成，见[第四阶段基准交付](stage4-a-benchmark.md)。
 
 - 所有预定到达先在 C++ 计数，operation_id 在本轮唯一，重试必须使用新标识并另存关联，不能悄悄替换失败记录。
 - 有界客户端队列同时受条数和字节限制。请求借用的输入/复制的写载荷、worker、结果队列与日志线程同属 Job；队列分配和保留容量占 workspace，不在引擎预算外另开无限缓冲。
