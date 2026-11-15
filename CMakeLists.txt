@@ -22,6 +22,9 @@ target_compile_definitions(agent_io_benchmark PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_link_libraries(agent_io_benchmark PUBLIC agent_io_storage PRIVATE psapi)
 
+add_executable(benchmark_runner_test tests/benchmark/benchmark-runner-test.cpp)
+target_link_libraries(benchmark_runner_test PRIVATE agent_io_benchmark)
+
 add_executable(synchronous_storage_test tests/storage/synchronous-storage-test.cpp)
 target_link_libraries(synchronous_storage_test PRIVATE agent_io_storage)
 target_compile_definitions(synchronous_storage_test PRIVATE
@@ -39,7 +42,7 @@ target_compile_definitions(job_runner PRIVATE
 target_link_libraries(job_runner PRIVATE psapi)
 
 if(MSVC)
-    foreach(target agent_io_contracts agent_io_storage agent_io_benchmark
+    foreach(target agent_io_contracts agent_io_storage agent_io_benchmark benchmark_runner_test
                    synchronous_storage_test
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
@@ -78,11 +81,22 @@ if(AGENT_IO_BOOST_INCLUDE)
     if(MSVC)
         target_compile_options(vector_bench PRIVATE /W4 /WX /permissive- /EHsc)
     endif()
+    set(AGENT_IO_TEST_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe"
+        CACHE FILEPATH "Python for native producer integration tests")
 else()
     message(STATUS "vector_bench CLI disabled: set AGENT_IO_BOOST_INCLUDE to pinned Boost 1.78")
 endif()
 
 enable_testing()
+add_test(NAME benchmark_runner COMMAND benchmark_runner_test)
+set_tests_properties(benchmark_runner PROPERTIES TIMEOUT 30)
+if(TARGET vector_bench AND EXISTS "${AGENT_IO_TEST_PYTHON}")
+    add_test(NAME benchmark_cli COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark/check-benchmark.py"
+        --binary $<TARGET_FILE:vector_bench> --job-runner $<TARGET_FILE:job_runner>
+        --output-parent "${CMAKE_CURRENT_BINARY_DIR}/benchmark-cli-$<CONFIG>")
+    set_tests_properties(benchmark_cli PROPERTIES TIMEOUT 60)
+endif()
 add_test(NAME synchronous_storage COMMAND synchronous_storage_test)
 set_tests_properties(synchronous_storage PROPERTIES TIMEOUT 30)
 add_test(NAME windows_environment_probe COMMAND windows_environment_probe)

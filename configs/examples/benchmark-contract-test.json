@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "protocol_version": "EVAL-1.1",
+  "purpose": "contract_example",
+  "run_id": "benchmark-producer-check",
+  "dataset": {
+    "format": "raw-f32le-v1",
+    "vectors": "../../data/example/base.f32",
+    "ids": "../../data/example/base.ids.u64",
+    "queries": "../../data/example/queries.f32",
+    "query_ids": "../../data/example/query.ids.u64",
+    "vector_count": "10",
+    "query_count": "7",
+    "dimension": 2,
+    "metric": "squared_l2",
+    "sha256": {
+      "vectors": null,
+      "ids": null,
+      "queries": null,
+      "query_ids": null
+    }
+  },
+  "engine": {
+    "directory": "../../data/example/index",
+    "io_backend": "synchronous",
+    "direct_reads": true,
+    "cache_policy": "disabled",
+    "block_bytes": 4096,
+    "memory": {
+      "total_bytes": "268435456",
+      "cache_bytes": "107374182",
+      "delta_bytes": "53687091",
+      "metadata_bytes": "53687091",
+      "workspace_bytes": "40265318",
+      "reserve_bytes": "13421774"
+    },
+    "rebuild_memory": null,
+    "resources": {
+      "max_disk_segments": 16,
+      "max_retained_generations": 2,
+      "max_retained_delta_vectors": 12288,
+      "background_workspace_bytes": "209715200",
+      "min_free_disk_bytes": "42949672960"
+    },
+    "read_scheduling": {
+      "demand_reserve": 8,
+      "background_reserve": 1,
+      "max_background_reads": 8,
+      "demand_burst_before_background": 8
+    },
+    "wal": {
+      "rotation_bytes": "67108864",
+      "max_frame_bytes": "1048576"
+    },
+    "max_queries": 3,
+    "max_pending_writes": 64,
+    "max_inflight_reads": 64,
+    "max_prefetch_reads": 16,
+    "max_delta_segments": 4,
+    "group_commit_window_ms": "1"
+  },
+  "search": {
+    "k": 10,
+    "candidate_limit": 128,
+    "prefetch_blocks": 0,
+    "timeout_ms": "5000"
+  },
+  "workload": {
+    "mode": "open_loop",
+    "target_ops_per_second": 100,
+    "workers": 3,
+    "client_queue_capacity": 128,
+    "client_queue_bytes": "1048576",
+    "query_fraction": 1.0,
+    "insert_fraction": 0.0,
+    "upsert_fraction": 0.0,
+    "seed": "20261115"
+  },
+  "measurement": {
+    "warmup_ms": "50",
+    "duration_ms": "200",
+    "drain_timeout_ms": "1000",
+    "sample_interval_ms": "25",
+    "result_queue_capacity": 128,
+    "result_queue_bytes": "1048576",
+    "max_record_bytes": 65536
+  }
+}
