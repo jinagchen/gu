@@ -4,7 +4,7 @@
 
 namespace agent_io {
 
-// A-side producer contract; these types do not implement a benchmark runner.
+// EVAL-1.1 value types shared by the producer and its consumers.
 struct BenchmarkLimits {
     std::uint32_t workers = 1;
     std::uint32_t client_queue_capacity = 128;

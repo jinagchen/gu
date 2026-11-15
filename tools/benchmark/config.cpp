@@ -1,0 +1,363 @@
+#include "config.hpp"
+
+#include <boost/json/basic_parser_impl.hpp>
+
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <fstream>
+#include <set>
+
+namespace agent_io::bench_cli {
+namespace {
+namespace json = boost::json;
+constexpr std::uint64_t kU64Max = UINT64_MAX;
+
+void Require(bool condition, const char* message) {
+    if (!condition) throw ConfigError(message);
+}
+
+const json::object& Object(const json::value& value,
+                          std::initializer_list<json::string_view> fields) {
+    Require(value.is_object(), "Expected JSON object");
+    const auto& object = value.as_object();
+    Require(object.size() == fields.size(), "Unknown or missing configuration field");
+    for (auto field : fields)
+        Require(object.contains(field), "Unknown or missing configuration field");
+    return object;
+}
+
+std::string Text(const json::value& value, std::size_t maximum = 32768) {
+    Require(value.is_string() && !value.as_string().empty(), "Expected nonempty string");
+    const auto& text = value.as_string();
+    Require(text.size() <= maximum && text.find('\0') == json::string::npos,
+            "String is too long or contains NUL");
+    return {text.data(), text.size()};
+}
+
+std::uint64_t U64(const json::value& value, bool positive = false) {
+    const auto text = Text(value, 20);
+    Require(text == "0" || (text.front() >= '1' && text.front() <= '9'),
+            "Expected canonical unsigned decimal string");
+    std::uint64_t result = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
+    Require(parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() &&
+            (!positive || result), "Invalid uint64 string");
+    return result;
+}
+
+std::uint32_t U32(const json::value& value, bool positive = false) {
+    Require(value.is_int64() || value.is_uint64(), "Expected JSON integer, not boolean");
+    const auto number = value.is_uint64() ? value.as_uint64() :
+        value.as_int64() < 0 ? kU64Max : static_cast<std::uint64_t>(value.as_int64());
+    Require(number <= UINT32_MAX && (!positive || number), "Invalid uint32 integer");
+    return static_cast<std::uint32_t>(number);
+}
+
+double Number(const json::value& value) {
+    Require(value.is_number(), "Expected finite JSON number");
+    const auto number = value.to_number<double>();
+    Require(std::isfinite(number), "Expected finite JSON number");
+    return number;
+}
+
+std::chrono::milliseconds Milliseconds(const json::value& value, bool positive = false) {
+    const auto count = U64(value, positive);
+    Require(count <= kU64Max / 1000000 && count <= INT64_MAX, "Duration overflow");
+    return std::chrono::milliseconds(static_cast<std::int64_t>(count));
+}
+
+MemoryBudget Memory(const json::value& value) {
+    const auto& object = Object(value, {"total_bytes", "cache_bytes", "delta_bytes",
+        "metadata_bytes", "workspace_bytes", "reserve_bytes"});
+    MemoryBudget budget{U64(object.at("total_bytes"), true),
+        U64(object.at("cache_bytes")), U64(object.at("delta_bytes"), true),
+        U64(object.at("metadata_bytes"), true), U64(object.at("workspace_bytes"), true),
+        U64(object.at("reserve_bytes"), true)};
+    std::uint64_t sum = 0;
+    for (auto part : {budget.cache_bytes, budget.delta_bytes, budget.metadata_bytes,
+                      budget.workspace_bytes, budget.reserve_bytes}) {
+        Require(part <= kU64Max - sum, "Memory partition overflow");
+        sum += part;
+    }
+    Require(sum == budget.total_bytes, "Memory partitions do not sum to total");
+    return budget;
+}
+
+void Checksum(const json::value& value, bool example) {
+    if (value.is_null()) {
+        Require(example, "Missing measurement checksum");
+        return;
+    }
+    const auto text = Text(value, 64);
+    Require(text.size() == 64 && std::all_of(text.begin(), text.end(), [](char item) {
+        return (item >= '0' && item <= '9') || (item >= 'a' && item <= 'f');
+    }), "SHA256 must have 64 lowercase hexadecimal characters");
+}
+
+// Boost.JSON's DOM accepts duplicate keys. A SAX pass rejects them, including
+// escaped aliases, before the same mature parser constructs the DOM.
+struct UniqueKeys {
+    static constexpr std::size_t max_array_size = 4096;
+    static constexpr std::size_t max_object_size = 4096;
+    static constexpr std::size_t max_string_size = 32768;
+    static constexpr std::size_t max_key_size = 32768;
+    std::vector<std::set<std::string>> objects;
+    std::string key;
+    bool on_document_begin(json::error_code&) { return true; }
+    bool on_document_end(json::error_code&) { return true; }
+    bool on_object_begin(json::error_code&) { objects.emplace_back(); return true; }
+    bool on_object_end(std::size_t, json::error_code&) { objects.pop_back(); return true; }
+    bool on_array_begin(json::error_code&) { return true; }
+    bool on_array_end(std::size_t, json::error_code&) { return true; }
+    bool on_key_part(json::string_view text, std::size_t, json::error_code&) {
+        key.append(text.data(), text.size()); return true;
+    }
+    bool on_key(json::string_view text, std::size_t, json::error_code& error) {
+        key.append(text.data(), text.size());
+        const bool unique = objects.back().insert(key).second;
+        key.clear();
+        if (!unique) error = json::error::syntax;
+        return unique;
+    }
+    bool on_string_part(json::string_view, std::size_t, json::error_code&) { return true; }
+    bool on_string(json::string_view, std::size_t, json::error_code&) { return true; }
+    bool on_number_part(json::string_view, json::error_code&) { return true; }
+    bool on_int64(std::int64_t, json::string_view, json::error_code&) { return true; }
+    bool on_uint64(std::uint64_t, json::string_view, json::error_code&) { return true; }
+    bool on_double(double value, json::string_view, json::error_code& error) {
+        if (std::isfinite(value)) return true;
+        error = json::error::syntax; return false;
+    }
+    bool on_bool(bool, json::error_code&) { return true; }
+    bool on_null(json::error_code&) { return true; }
+    bool on_comment_part(json::string_view, json::error_code&) { return true; }
+    bool on_comment(json::string_view, json::error_code&) { return true; }
+};
+
+json::object Counts(const RequestCounts& counts) {
+    return {{"scheduled", std::to_string(counts.scheduled)},
+        {"succeeded", std::to_string(counts.succeeded)},
+        {"failed", std::to_string(counts.failed)},
+        {"rejected", std::to_string(counts.rejected)},
+        {"pending", std::to_string(counts.pending)},
+        {"window_completed", std::to_string(counts.window_completed)},
+        {"window_succeeded", std::to_string(counts.window_succeeded)}};
+}
+
+json::object Header(const BenchmarkOptions& options) {
+    return {{"schema_version", 1}, {"protocol_version", "EVAL-1.1"},
+        {"purpose", options.purpose}, {"run_id", options.run_id}};
+}
+
+json::object Latency(const BenchmarkLatency& value) {
+    json::array bins;
+    for (auto count : value.bins) bins.emplace_back(std::to_string(count));
+    return {{"count", std::to_string(value.count)},
+        {"min_ns", value.count ? json::value(std::to_string(value.min_ns)) : json::value(nullptr)},
+        {"max_ns", value.count ? json::value(std::to_string(value.max_ns)) : json::value(nullptr)},
+        {"power_of_two_ns_bins", std::move(bins)}};
+}
+}  // namespace
+
+std::string Utf8(const std::filesystem::path& path) {
+    const auto text = path.u8string();
+    return {reinterpret_cast<const char*>(text.data()), text.size()};
+}
+
+Config ReadConfig(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    Require(static_cast<bool>(input), "Cannot open configuration");
+    std::string text(1048577, '\0');
+    input.read(text.data(), static_cast<std::streamsize>(text.size()));
+    const auto size = input.gcount();
+    Require(size > 0 && size <= 1048576, "Configuration must fit in 1 MiB");
+    text.resize(static_cast<std::size_t>(size));
+    json::basic_parser<UniqueKeys> parser(json::parse_options{});
+    json::error_code error;
+    const auto consumed = parser.write_some(false, text.data(), text.size(), error);
+    Require(!error && consumed == text.size() && parser.done(),
+            "Invalid JSON, duplicate key, nonfinite number or trailing content");
+    const auto document = json::parse(text);
+    const auto& root = Object(document, {"schema_version", "protocol_version", "purpose",
+        "run_id", "dataset", "engine", "search", "workload", "measurement"});
+    Require(U32(root.at("schema_version")) == 1 &&
+            Text(root.at("protocol_version")) == "EVAL-1.1", "Unsupported protocol");
+    Config config;
+    auto& options = config.benchmark;
+    options.run_id = Text(root.at("run_id"), 128);
+    options.purpose = Text(root.at("purpose"));
+    Require(options.purpose == "measurement" || options.purpose == "contract_example",
+            "Unsupported purpose");
+    const auto& dataset = Object(root.at("dataset"), {"format", "vectors", "ids",
+        "queries", "query_ids", "vector_count", "query_count", "dimension", "metric", "sha256"});
+    Require(Text(dataset.at("format")) == "raw-f32le-v1" &&
+            Text(dataset.at("metric")) == "squared_l2", "Unsupported dataset format or metric");
+    config.vector_count = U64(dataset.at("vector_count"), true);
+    options.query_count = U64(dataset.at("query_count"), true);
+    config.dimension = U32(dataset.at("dimension"), true);
+    const auto& hashes = Object(dataset.at("sha256"), {"vectors", "ids", "queries", "query_ids"});
+    for (auto name : {"vectors", "ids", "queries", "query_ids"}) {
+        Text(dataset.at(name));
+        Checksum(hashes.at(name), options.purpose == "contract_example");
+    }
+    const auto& engine = Object(root.at("engine"), {"directory", "io_backend", "direct_reads",
+        "cache_policy", "block_bytes", "memory", "rebuild_memory", "resources",
+        "read_scheduling", "wal", "max_queries", "max_pending_writes", "max_inflight_reads",
+        "max_prefetch_reads", "max_delta_segments", "group_commit_window_ms"});
+    Text(engine.at("directory"));
+    const auto backend = Text(engine.at("io_backend"));
+    Require(backend == "synchronous" || backend == "windows_iocp", "Invalid I/O backend");
+    const auto cache = Text(engine.at("cache_policy"));
+    Require(cache == "disabled" || cache == "clock", "Invalid cache policy");
+    Require(engine.at("direct_reads").is_bool(), "Expected direct_reads boolean");
+    U32(engine.at("block_bytes"), true);
+    config.memory = Memory(engine.at("memory"));
+    const auto& resources = Object(engine.at("resources"), {"max_disk_segments",
+        "max_retained_generations", "max_retained_delta_vectors",
+        "background_workspace_bytes", "min_free_disk_bytes"});
+    U32(resources.at("max_disk_segments"), true);
+    Require(U32(resources.at("max_retained_generations"), true) >= 2,
+            "At least two retained generations required");
+    const auto retained = U32(resources.at("max_retained_delta_vectors"), true);
+    const auto background = U64(resources.at("background_workspace_bytes"), true);
+    U64(resources.at("min_free_disk_bytes"));
+    const auto delta_record = std::uint64_t{config.dimension} * 4 + 32;
+    Require(delta_record <= config.memory.delta_bytes / retained, "Retained delta exceeds budget");
+    if (!engine.at("rebuild_memory").is_null()) {
+        const auto rebuild = Memory(engine.at("rebuild_memory"));
+        Require(rebuild.total_bytes == config.memory.total_bytes &&
+                background < rebuild.workspace_bytes &&
+                delta_record <= rebuild.delta_bytes / retained, "Invalid rebuild budget");
+    }
+    U32(engine.at("max_queries"), true);
+    U32(engine.at("max_pending_writes"), true);
+    const auto inflight = U32(engine.at("max_inflight_reads"), true);
+    const auto prefetch = U32(engine.at("max_prefetch_reads"));
+    U32(engine.at("max_delta_segments"), true);
+    Require(U64(engine.at("group_commit_window_ms")) <= INT64_MAX, "Group commit overflow");
+    const auto& scheduling = Object(engine.at("read_scheduling"), {"demand_reserve",
+        "background_reserve", "max_background_reads", "demand_burst_before_background"});
+    const auto demand = U32(scheduling.at("demand_reserve"), true);
+    const auto background_reserve = U32(scheduling.at("background_reserve"), true);
+    const auto background_max = U32(scheduling.at("max_background_reads"), true);
+    U32(scheduling.at("demand_burst_before_background"), true);
+    Require(demand < inflight && background_reserve <= background_max &&
+            background_max <= inflight - demand &&
+            prefetch <= inflight - demand - background_reserve, "Invalid I/O reservations");
+    const auto& wal = Object(engine.at("wal"), {"rotation_bytes", "max_frame_bytes"});
+    const auto frame = U64(wal.at("max_frame_bytes"), true);
+    Require(frame <= UINT32_MAX && frame >= ((64 + config.dimension * std::uint64_t{4} +
+            4 + 7) / 8 * 8) && U64(wal.at("rotation_bytes"), true) >= frame + 64,
+            "Invalid WAL frame or rotation bound");
+    const auto& search = Object(root.at("search"), {"k", "candidate_limit",
+        "prefetch_blocks", "timeout_ms"});
+    options.search.k = U32(search.at("k"), true);
+    options.search.candidate_limit = U32(search.at("candidate_limit"), true);
+    options.search.prefetch_blocks = U32(search.at("prefetch_blocks"));
+    Require(options.search.prefetch_blocks <= prefetch, "Query prefetch exceeds cap");
+    options.search.timeout = Milliseconds(search.at("timeout_ms"), true);
+    const auto& workload = Object(root.at("workload"), {"mode", "target_ops_per_second",
+        "workers", "client_queue_capacity", "client_queue_bytes",
+        "query_fraction", "insert_fraction", "upsert_fraction", "seed"});
+    Require(Text(workload.at("mode")) == "open_loop", "Only open_loop is implemented");
+    options.target_ops_per_second = Number(workload.at("target_ops_per_second"));
+    options.limits.workers = U32(workload.at("workers"), true);
+    options.limits.client_queue_capacity = U32(workload.at("client_queue_capacity"), true);
+    options.limits.client_queue_bytes = U64(workload.at("client_queue_bytes"), true);
+    Require(Number(workload.at("query_fraction")) == 1 &&
+            Number(workload.at("insert_fraction")) == 0 &&
+            Number(workload.at("upsert_fraction")) == 0, "This runner supports static queries only");
+    options.seed = U64(workload.at("seed"));
+    const auto& measurement = Object(root.at("measurement"), {"warmup_ms", "duration_ms",
+        "drain_timeout_ms", "sample_interval_ms", "result_queue_capacity",
+        "result_queue_bytes", "max_record_bytes"});
+    options.warmup = Milliseconds(measurement.at("warmup_ms"));
+    options.duration = Milliseconds(measurement.at("duration_ms"), true);
+    options.drain_timeout = Milliseconds(measurement.at("drain_timeout_ms"), true);
+    options.sample_interval = Milliseconds(measurement.at("sample_interval_ms"), true);
+    options.limits.result_queue_capacity = U32(measurement.at("result_queue_capacity"), true);
+    options.limits.result_queue_bytes = U64(measurement.at("result_queue_bytes"), true);
+    options.limits.max_record_bytes = U32(measurement.at("max_record_bytes"), true);
+    Require(options.limits.client_queue_bytes >= (std::max)(
+        std::uint64_t{options.limits.max_record_bytes}, std::uint64_t{config.dimension} * 4 + 1024),
+        "Client byte cap below query bound");
+    const auto plan = PlanStaticBenchmark(options);
+    if (const auto* issue = std::get_if<Error>(&plan)) throw ConfigError(issue->message);
+    config.effective = root;
+    const auto base = std::filesystem::absolute(path).parent_path();
+    auto resolve = [&](const json::value& value) {
+        const auto source = Text(value);
+        const std::u8string encoded(reinterpret_cast<const char8_t*>(source.data()), source.size());
+        return Utf8(std::filesystem::absolute(base /
+            std::filesystem::path(encoded)).lexically_normal());
+    };
+    for (auto name : {"vectors", "ids", "queries", "query_ids"})
+        config.effective.at("dataset").as_object().at(name) = resolve(dataset.at(name));
+    config.effective.at("engine").as_object().at("directory") = resolve(engine.at("directory"));
+    return config;
+}
+
+boost::json::object Counters(const BenchmarkOptions& options, const BenchmarkReport& report) {
+    auto output = Header(options);
+    output["duration_ns"] = std::to_string(report.duration_ns);
+    output["drain_ns"] = std::to_string(report.drain_ns);
+    output["run_incomplete"] = report.run_incomplete;
+    output["requires_review"] = false;
+    output["measurement_start_sequence"] = std::to_string(report.start_stats.published_sequence);
+    output["measurement_end_sequence"] = std::to_string(report.end_stats.published_sequence);
+    output["by_type"] = json::object{{"query", Counts(report.query)},
+        {"insert", Counts({})}, {"upsert", Counts({})}};
+    const auto& delta = report.counter_delta;
+    output["engine_counters"] = json::object{
+        {"io_reads_submitted", std::to_string(delta.io_reads_submitted)},
+        {"io_read_bytes_completed", std::to_string(delta.io_read_bytes_completed)},
+        {"io_read_errors", std::to_string(delta.io_read_errors)},
+        {"prefetch_submitted", std::to_string(delta.prefetch_submitted)},
+        {"prefetch_consumed", std::to_string(delta.prefetch_consumed)},
+        {"wal_bytes_written", std::to_string(delta.wal_bytes_written)},
+        {"checkpoint_bytes_written", std::to_string(delta.checkpoint_bytes_written)},
+        {"merge_bytes_written", std::to_string(delta.merge_bytes_written)}};
+    return output;
+}
+
+boost::json::object Summary(const BenchmarkOptions& options, const BenchmarkReport& report) {
+    auto output = Header(options);
+    output["exit_code"] = report.exit_code;
+    output["diagnostic"] = report.diagnostic.empty() ? json::value(nullptr) :
+        json::value(report.diagnostic);
+    output["window_completed_qps"] = report.query.window_succeeded * 1e9 /
+        static_cast<double>(report.duration_ns);
+    output["drained_qps"] = report.query.succeeded * 1e9 /
+        static_cast<double>(report.duration_ns + report.drain_ns);
+    output["latency_histogram_encoding"] = "bin 0: 0 ns; bin i: [2^(i-1), 2^i-1] ns";
+    json::object latencies;
+    const char* statuses[] = {"ok", "error", "rejected"};
+    for (std::size_t i = 0; i < 3; ++i)
+        latencies[statuses[i]] = json::object{{"end_to_end", Latency(report.end_to_end[i])},
+            {"queue", Latency(report.queue[i])}, {"service", Latency(report.service[i])}};
+    output["latencies"] = std::move(latencies);
+    constexpr const char* error_codes[] = {
+        "invalid_argument", "not_found", "already_exists", "resource_exhausted",
+        "deadline_exceeded", "search_incomplete", "io_error", "corruption",
+        "unsupported", "closed", "recovery_required"};
+    static_assert(static_cast<int>(ErrorCode::recovery_required) + 1 == std::size(error_codes));
+    json::object errors;
+    for (std::size_t i = 0; i < std::size(error_codes); ++i)
+        errors[error_codes[i]] = std::to_string(report.errors_by_code[i]);
+    output["errors_by_code"] = std::move(errors);
+    output["api_timeouts"] = json::object{
+        {"end_to_end", Latency(report.timeout_end_to_end)},
+        {"queue", Latency(report.timeout_queue)}, {"service", Latency(report.timeout_service)}};
+    output["query_log_bytes"] = std::to_string(report.query_log_bytes);
+    output["sample_log_bytes"] = std::to_string(report.sample_log_bytes);
+    output["cleanup_ns"] = std::to_string(report.cleanup_ns);
+    output["warmup_elapsed_ns"] = std::to_string(report.warmup_elapsed_ns);
+    output["warmup_query"] = Counts(report.warmup_query);
+    output["resources"] = json::object{{"client_slots", report.resources.client_slots},
+        {"result_slots", report.resources.result_slots},
+        {"workspace_bytes", std::to_string(report.resources.workspace_bytes)}};
+    return output;
+}
+
+}  // namespace agent_io::bench_cli

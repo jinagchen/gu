@@ -15,6 +15,13 @@ target_compile_features(agent_io_storage PUBLIC cxx_std_20)
 target_compile_definitions(agent_io_storage PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 
+add_library(agent_io_benchmark STATIC src/benchmark/runner.cpp)
+target_include_directories(agent_io_benchmark PUBLIC include)
+target_compile_features(agent_io_benchmark PUBLIC cxx_std_20)
+target_compile_definitions(agent_io_benchmark PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_link_libraries(agent_io_benchmark PUBLIC agent_io_storage PRIVATE psapi)
+
 add_executable(synchronous_storage_test tests/storage/synchronous-storage-test.cpp)
 target_link_libraries(synchronous_storage_test PRIVATE agent_io_storage)
 target_compile_definitions(synchronous_storage_test PRIVATE
@@ -32,10 +39,47 @@ target_compile_definitions(job_runner PRIVATE
 target_link_libraries(job_runner PRIVATE psapi)
 
 if(MSVC)
-    foreach(target agent_io_contracts agent_io_storage synchronous_storage_test
+    foreach(target agent_io_contracts agent_io_storage agent_io_benchmark
+                   synchronous_storage_test
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
+endif()
+
+# Reuse the pinned Boost 1.78 headers already installed for DiskANN. Core
+# storage and runner builds remain independent of this CLI-only JSON library.
+find_path(AGENT_IO_BOOST_INCLUDE boost/json/src.hpp HINTS
+    "${AGENT_IO_DISKANN_PACKAGES}/boost/lib/native/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/build/diskann/packages/boost/lib/native/include")
+if(AGENT_IO_BOOST_INCLUDE)
+    add_library(agent_io_benchmark_json STATIC tools/benchmark/boost-json.cpp)
+    target_include_directories(agent_io_benchmark_json SYSTEM PUBLIC "${AGENT_IO_BOOST_INCLUDE}")
+    target_compile_definitions(agent_io_benchmark_json PUBLIC
+        BOOST_JSON_NO_LIB BOOST_CONTAINER_NO_LIB)
+    target_compile_features(agent_io_benchmark_json PUBLIC cxx_std_20)
+    add_executable(vector_bench tools/benchmark/main.cpp tools/benchmark/config.cpp)
+    target_link_libraries(vector_bench PRIVATE agent_io_benchmark agent_io_benchmark_json)
+    target_compile_definitions(vector_bench PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
+        AGENT_IO_BUILD_CONFIG="$<CONFIG>")
+    execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE AGENT_IO_BUILD_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    execute_process(COMMAND git status --porcelain WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE AGENT_IO_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(AGENT_IO_DIRTY)
+        set(AGENT_IO_DIRTY_VALUE "true")
+    else()
+        set(AGENT_IO_DIRTY_VALUE "false")
+    endif()
+    target_compile_definitions(vector_bench PRIVATE
+        AGENT_IO_BUILD_COMMIT="${AGENT_IO_BUILD_COMMIT}"
+        AGENT_IO_BUILD_DIRTY="${AGENT_IO_DIRTY_VALUE}")
+    if(MSVC)
+        target_compile_options(vector_bench PRIVATE /W4 /WX /permissive- /EHsc)
+    endif()
+else()
+    message(STATUS "vector_bench CLI disabled: set AGENT_IO_BOOST_INCLUDE to pinned Boost 1.78")
 endif()
 
 enable_testing()
