@@ -8,6 +8,9 @@ endif()
 add_library(agent_io_contracts OBJECT tools/contracts/header-smoke.cpp)
 target_compile_features(agent_io_contracts PRIVATE cxx_std_20)
 
+add_library(agent_io_index_contracts OBJECT tools/contracts/header-smoke-b.cpp)
+target_compile_features(agent_io_index_contracts PRIVATE cxx_std_20)
+
 add_library(agent_io_storage STATIC
     src/storage/synchronous_storage.cpp src/storage/synchronous_block_reader.cpp)
 target_include_directories(agent_io_storage PUBLIC include)
@@ -42,7 +45,8 @@ target_compile_definitions(job_runner PRIVATE
 target_link_libraries(job_runner PRIVATE psapi)
 
 if(MSVC)
-    foreach(target agent_io_contracts agent_io_storage agent_io_benchmark benchmark_runner_test
+    foreach(target agent_io_contracts agent_io_index_contracts
+                   agent_io_storage agent_io_benchmark benchmark_runner_test
                    synchronous_storage_test
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
