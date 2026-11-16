@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "protocol_version": "EVAL-1.1",
+  "purpose": "contract_example",
+  "build_id": "build-contract-001",
+  "dataset": {
+    "format": "raw-f32le-v1",
+    "vectors": "../../data/example/base.f32",
+    "ids": "../../data/example/base.ids.u64",
+    "vector_count": "24",
+    "dimension": 4,
+    "metric": "squared_l2",
+    "sha256": {
+      "vectors": null,
+      "ids": null
+    }
+  },
+  "native": {
+    "dependency": "diskann",
+    "version": "0.6.1+4c31367",
+    "native_version": null,
+    "max_degree": 32,
+    "build_beam": 4,
+    "pq_bytes": 64,
+    "parameters": "L32 R32 B4 M16"
+  },
+  "limits": {
+    "memory_limit_bytes": "536870912",
+    "min_free_disk_bytes": "42949672960",
+    "job_object": true,
+    "measurement_scope": "build_process_tree",
+    "max_peak_commit_bytes": "536870912"
+  },
+  "staging": {
+    "directory": "../../data/example/index.staging",
+    "same_volume": true,
+    "reuse_allowed": false
+  },
+  "output": {
+    "directory": "../../data/example/index",
+    "checkpoint_sequence": "0",
+    "generation": "1",
+    "publish_current": true
+  },
+  "notes": [
+    "All paths must be ASCII; the native loader uses narrow-character interfaces.",
+    "vectors and ids sha256 are null only because purpose is contract_example.",
+    "The 512 MiB job limit is a fixture value, not evidence that a full build fits."
+  ]
+}

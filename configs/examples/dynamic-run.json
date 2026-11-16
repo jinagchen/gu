@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "protocol_version": "EVAL-1.1",
+  "purpose": "contract_example",
+  "run_id": "stage3-b-exact",
+  "index": {
+    "directory": "../../data/example/index",
+    "build_id": "build-contract-001",
+    "manifest_generation": "1"
+  },
+  "dataset": {
+    "format": "raw-f32le-v1",
+    "vectors": "../../data/example/base.f32",
+    "ids": "../../data/example/base.ids.u64",
+    "queries": "../../data/example/queries.f32",
+    "query_ids": "../../data/example/query.ids.u64",
+    "updates": "../../data/example/updates.f32",
+    "vector_count": "24",
+    "query_count": "6",
+    "dimension": 4,
+    "metric": "squared_l2",
+    "sha256": {
+      "vectors": null,
+      "ids": null,
+      "queries": null,
+      "query_ids": null,
+      "updates": null
+    }
+  },
+  "trace": {
+    "file": "../../evaluation/examples/stage3-b/trace.jsonl",
+    "sha256": null,
+    "operations": "10",
+    "queries": "6",
+    "seed": "20261116",
+    "update_distribution": "uniform_existing_and_new",
+    "snapshot_policy": {
+      "mode": "committed_prefix",
+      "min_distinct_snapshots": 2,
+      "max_queries_per_snapshot": 4
+    }
+  },
+  "engine": {
+    "directory": "../../data/example/index",
+    "io_backend": "windows_iocp",
+    "direct_reads": true,
+    "cache_policy": "clock",
+    "block_bytes": 4096,
+    "memory": {
+      "total_bytes": "268435456",
+      "cache_bytes": "107374182",
+      "delta_bytes": "53687091",
+      "metadata_bytes": "53687091",
+      "workspace_bytes": "40265318",
+      "reserve_bytes": "13421774"
+    },
+    "rebuild_memory": null,
+    "resources": {
+      "max_disk_segments": 16,
+      "max_retained_generations": 2,
+      "max_retained_delta_vectors": 12288,
+      "background_workspace_bytes": "209715200",
+      "min_free_disk_bytes": "42949672960"
+    },
+    "read_scheduling": {
+      "demand_reserve": 8,
+      "background_reserve": 1,
+      "max_background_reads": 8,
+      "demand_burst_before_background": 8
+    },
+    "wal": {
+      "rotation_bytes": "67108864",
+      "max_frame_bytes": "1048576"
+    },
+    "max_queries": 1,
+    "max_pending_writes": 64,
+    "max_inflight_reads": 64,
+    "max_prefetch_reads": 16,
+    "max_delta_segments": 4,
+    "group_commit_window_ms": "1"
+  },
+  "search": {
+    "k": 10,
+    "candidate_limit": 128,
+    "prefetch_blocks": 4,
+    "timeout_ms": "5000"
+  },
+  "workload": {
+    "mode": "open_loop",
+    "target_ops_per_second": 200,
+    "workers": 2,
+    "client_queue_capacity": 128,
+    "client_queue_bytes": "1048576",
+    "query_fraction": 0.375,
+    "insert_fraction": 0.25,
+    "upsert_fraction": 0.375,
+    "seed": "20261116"
+  },
+  "measurement": {
+    "warmup_ms": "60000",
+    "duration_ms": "300000",
+    "drain_timeout_ms": "30000",
+    "sample_interval_ms": "1000",
+    "result_queue_capacity": 128,
+    "result_queue_bytes": "1048576",
+    "max_record_bytes": 65536
+  },
+  "notes": [
+    "Dynamic runs must keep the trace fixed so answers are comparable across configurations.",
+    "trace.operations counts writes only; operations + queries equals the trace row count.",
+    "The three workload fractions must match the referenced trace (6 queries, 4 inserts, 6 upserts of 16); a conflict is a configuration error, not a reason to resample.",
+    "snapshot_sequence is captured per query; the trace only fixes arrival order, not publication order.",
+    "queries that never reach the API use a null snapshot and count as failures, not fabricated answers."
+  ]
+}
