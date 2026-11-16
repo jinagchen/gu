@@ -1,5 +1,7 @@
 /build/
+/out/
 /.venv/
+/.vs/
 /data/
 /runs/
 __pycache__/
