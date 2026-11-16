@@ -1,6 +1,6 @@
 # C++ 基准与 Python 评测协议
 
-协议版本 EVAL-1.1，日期 2026 年 11 月 11 日。对应 DESIGN-1.1、API-1.2 与 REQ-1.0，当前执行平台为本机 Windows。2026 年 11 月 15 日已实现 A 的静态基准 CLI 和运行器，当前显式合成目标仅用于生产端验证，真实 Engine 目标尚未链接，见[交付记录](stage4-a-benchmark.md)。A 生产端的字段、守恒、错误和有界输出约束见 [基准输出字段契约](benchmark-output-contract.md)；B 的构建配置、动态输入轨迹及独立答案仍待补齐。
+协议版本 EVAL-1.1，日期 2026 年 11 月 11 日。对应 DESIGN-1.1、API-1.2 与 REQ-1.0，当前执行平台为本机 Windows。2026 年 11 月 15 日已实现 A 的静态基准 CLI 和运行器，当前显式合成目标仅用于生产端验证，真实 Engine 目标尚未链接，见[交付记录](stage4-a-benchmark.md)。A 生产端的字段、守恒、错误和有界输出约束见 [基准输出字段契约](benchmark-output-contract.md)；2026 年 11 月 16 日 B 补齐构建配置、动态输入轨迹、独立答案与 `evaluation.check`，见 [B 侧契约](stage3-b-contract.md)。
 
 原协议示例是用于检查字段与逻辑的手工合成数据，不是测得的吞吐、召回或延迟。新增 vector_bench 的 contract-test 会生成实际计时的合成调用记录，仍不作为磁盘检索或正式性能实验。
 
@@ -14,7 +14,7 @@ vector_bench --config <run.json> --output <new-run-directory>
 python -m evaluation.check --run <run-directory>
 ```
 
-vector_bench 已有静态生产端入口；默认 Engine 目标返回 3，测试需显式 --target contract-test。vector_build、evaluation.check 和真实目标的构建配置仍待 B 补充。A 已规定构建受限域、发布与资源交接要求，见 [A 侧契约](stage3-a-contract.md)。输出目录必须是新目录，已有结果不默认覆盖。
+vector_bench 已有静态生产端入口；默认 Engine 目标返回 3，测试需显式 --target contract-test。`evaluation.check` 已实现，可对运行目录做协议校验并计算召回；`vector_build` 的配置与首建契约已给出，但构建程序仍未实现，真实目标的构建配置也待接入。A 已规定构建受限域、发布与资源交接要求，见 [A 侧契约](stage3-a-contract.md)。输出目录必须是新目录，已有结果不默认覆盖。
 
 基准程序退出码约定：0 表示请求执行完成并写出完整协议工件，2 为配置错误，3 为环境或依赖不支持，4 为运行错误，5 为工件不完整。退出 0 不代表 Recall 达标，召回与资源验收由 Python 检查给结论；有失败请求时结果必须显式标记。
 
@@ -52,6 +52,8 @@ io_backend 当前取 synchronous 或 windows_iocp。Windows 内存约束和观�
 公开 API 不提供指定历史序号搜索。离线 Python 从初始数据加完整写入日志重建每个被测 S 的状态；相同 S 的精确答案可以复用。离线计算不在引擎测量同时占用同一设备或资源。
 
 有限时长运行还须输出停止后的最终写入清单，确保包含“先发布、查询已经看见、响应稍后到达”的组成员；记录不完整时不能继续计算一个看似精确的动态召回。
+
+轨迹与工件的关联由 `evaluation.check` 强制校验，不再只靠人工核对：轨迹行须带 `schema_version` / `protocol_version` / `purpose` / `run_id`，`arrival_index` 从 0 稠密递增；`trace.operations` 与 `trace.queries` 必须等于实际写入与查询行数；`queries.jsonl` 的 `snapshot_sequence` 必须等于轨迹记录的到达前缀，且不得超过此前已到达的写入数；`trace.sha256` 非空时必须匹配文件内容；`dataset.query_count` 必须等于 `queries.jsonl` 行数。轨迹文件须位于运行目录内（相对路径、不含 `..`），不能从目录外引用。
 
 ## 4 到达、计时与结束
 
@@ -116,4 +118,4 @@ Python 在执行离线召回前检查协议版本、ID/序号类型、配置与�
 
 比较性能时要求数据哈希、有效内存上限、持久化语义、目标机、运行模式与实测召回可比。结果不同源或字段缺失时拒绝自动生成“提升百分比”。
 
-A 的静态计时器、CLI 和实际生产端输出已实现；正式数据生成、真实 Engine 集成、独立召回及性能结果仍待完成。
+A 的静态计时器、CLI 和实际生产端输出已实现；B 的轨迹生成、运行校验与独立召回已实现，并用 24 条 4 维、10 次写、6 次查询的样例自检（见 [B 侧交付记录](stage3-b-completion.md)）。正式数据生成、真实 Engine 集成及性能结果仍待完成；样例的 Recall@10=1.0 来自精确扫描参考，不作为近似算法结论。

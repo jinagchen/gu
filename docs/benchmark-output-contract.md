@@ -2,7 +2,7 @@
 
 日期：2026 年 11 月 11 日，协议 EVAL-1.1，A 生产端交付。schema_version 保持 1，新增 protocol_version="EVAL-1.1" 区分字段修订，旧 EVAL-1 示例一并升级。本文件与 [评测协议](evaluation-protocol.md)、[A 侧契约](stage3-a-contract.md)共同使用。
 
-所有示例均为 purpose="contract_example" 的手工协议样例，不对应真实向量文件或运行结果。B 的动态输入轨迹、精确答案及最终 evaluation.json 仍待交付。
+所有示例均为 purpose="contract_example" 的手工协议样例，不对应真实向量文件或运行结果。B 已于 2026 年 11 月 16 日交付动态输入轨迹、精确答案生成端和 evaluation.json 消费端（见 [B 侧交付记录](stage3-b-completion.md)），其样例同样标为 contract_example，不构成真实运行结论。
 
 ## 1 类型规则
 

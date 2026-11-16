@@ -4,7 +4,7 @@
 
 当前有设计、声明式头文件、协议示例、Windows 环境/内存探针及 DiskANN 同步读取验证适配，尚无完整 Engine。阶段二已通过本机小规模工程可行性验收，依赖准确提交、读路径、容量粗算及计量证据见[验收记录](stage2-completion.md)。规模化性能、动态合并及官方内存口径仍待后续验证。平台边界见 [Windows 平台约定](windows-platform.md)。
 
-2026 年 11 月 11 日补充第三阶段 A 交付 STORAGE-A-1/API-1.2/EVAL-1.1：只读块租约、批读取、在途去重边界、文件延迟回收、资源预约与模式切换、WAL 编解码及基准输出契约已给出。详见 [A 侧存储与基准契约](stage3-a-contract.md)及[交付记录](stage3-a-completion.md)。B 的 IndexAdapter/DeltaStore、首次构建及动态输入仍待补齐和联合复核，DESIGN-1.1 不据此宣称整体冻结。
+2026 年 11 月 11 日补充第三阶段 A 交付 STORAGE-A-1/API-1.2/EVAL-1.1：只读块租约、批读取、在途去重边界、文件延迟回收、资源预约与模式切换、WAL 编解码及基准输出契约已给出。详见 [A 侧存储与基准契约](stage3-a-contract.md)及[交付记录](stage3-a-completion.md)。2026 年 11 月 16 日补充第三阶段 B 交付 INDEX-B-1：索引适配、稳定增量槽、快照内部类型、RequiredScratch、首次构建受限域、清单与版本目录契约，以及 Python 轨迹与召回校验，见 [B 侧契约](stage3-b-contract.md)及[交付记录](stage3-b-completion.md)。两侧均只有声明与夹具，DESIGN-1.1 不据此宣称整体冻结。
 
 ## 1 设计目标
 
@@ -182,7 +182,7 @@ Close 阻止新请求，排空已准入操作与在途读取、结束后台工�
 
 ## 11 接口、格式和评测文件
 
-- [公开与内部接口约定](interface-contract.md)，声明在 [engine.hpp](../include/agent_io/engine.hpp) 和 [storage.hpp](../include/agent_io/storage.hpp)。
+- [公开与内部接口约定](interface-contract.md)，声明在 [engine.hpp](../include/agent_io/engine.hpp)、[storage.hpp](../include/agent_io/storage.hpp) 和 [index.hpp](../include/agent_io/index.hpp)。
 - [磁盘格式与恢复协议](storage-protocol.md)：自有格式与第三方格式分界、WAL、清单发布、崩溃场景。
 - [基准与 Python 评测协议](evaluation-protocol.md)：输入、输出、快照和指标口径，含可解析示例。
 
@@ -194,7 +194,7 @@ Close 阻止新请求，排空已准入操作与在途读取、结束后台工�
 | 查询/更新重叠、合并尾部保留 | 已给出序号与前缀协议 | 并发交错测试和动态真实答案 |
 | WAL/清单崩溃恢复 | 已给出故障推演及 Windows 平台修订 | NTFS 下的进程终止、替换失败与恢复测试 |
 | C++ 头文件与示例协议 | 声明和工件已建立 | 本次做语法、静态契约及示例一致性检查 |
-| 图索引依赖 | DiskANN 0.6.1 准确提交及两处补丁已固定，小数据构建/加载/查询和同步读取适配通过 | 按实际读路径细化正式适配、元数据计量及首次构建契约 |
+| 图索引依赖 | DiskANN 0.6.1 准确提交及两处补丁已固定，小数据构建/加载/查询和同步读取适配通过 | 按实际读路径细化正式适配、元数据计量；INDEX-B-1 已给出契约与定位/候选类型，适配仍未实现 |
 | 无缓冲读取、IOCP、内存限制 | 独立探针通过读取与提交内存拒绝测试 | 完整引擎资源核算、队列/错误/取消和严格内存口径仍待验证 |
 | 正式评测与收益 | 未执行 | 按需求验收和实验矩阵检查 |
 
