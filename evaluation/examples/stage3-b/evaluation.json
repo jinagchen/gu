@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "protocol_version": "EVAL-1.1",
+  "purpose": "contract_example",
+  "run_id": "stage3-b-exact",
+  "queries": {
+    "total": 6,
+    "ok": 6,
+    "failed": 0,
+    "rejected": 0
+  },
+  "writes": {
+    "acknowledged": 10,
+    "first_sequence": 1,
+    "last_sequence": 10,
+    "uncertain": false
+  },
+  "recall_at_k": {
+    "k": 10,
+    "mean": 1.0,
+    "mean_ok_only": 1.0,
+    "per_query": [
+      {
+        "operation_id": "q-000",
+        "query_id": "0",
+        "snapshot_sequence": 5,
+        "score": 1.0,
+        "matched": 10,
+        "returned": 10
+      },
+      {
+        "operation_id": "q-001",
+        "query_id": "1",
+        "snapshot_sequence": 5,
+        "score": 1.0,
+        "matched": 10,
+        "returned": 10
+      },
+      {
+        "operation_id": "q-002",
+        "query_id": "2",
+        "snapshot_sequence": 8,
+        "score": 1.0,
+        "matched": 10,
+        "returned": 10
+      },
+      {
+        "operation_id": "q-003",
+        "query_id": "3",
+        "snapshot_sequence": 8,
+        "score": 1.0,
+        "matched": 10,
+        "returned": 10
+      },
+      {
+        "operation_id": "q-004",
+        "query_id": "4",
+        "snapshot_sequence": 10,
+        "score": 1.0,
+        "matched": 10,
+        "returned": 10
+      },
+      {
+        "operation_id": "q-005",
+        "query_id": "5",
+        "snapshot_sequence": 10,
+        "score": 1.0,
+        "matched": 10,
+        "returned": 10
+      }
+    ]
+  },
+  "snapshots": {
+    "distinct": 3,
+    "details": [
+      {
+        "snapshot_sequence": 5,
+        "queries": 2,
+        "live_vectors": 25,
+        "mean_recall": 1.0
+      },
+      {
+        "snapshot_sequence": 8,
+        "queries": 2,
+        "live_vectors": 26,
+        "mean_recall": 1.0
+      },
+      {
+        "snapshot_sequence": 10,
+        "queries": 2,
+        "live_vectors": 28,
+        "mean_recall": 1.0
+      }
+    ]
+  },
+  "checks": {
+    "protocol_types": "pass",
+    "request_conservation": "pass",
+    "clock_monotonic": "pass",
+    "version_within_snapshot": "pass",
+    "neighbour_versions_current": "pass",
+    "neighbour_distances_recomputed": "pass",
+    "write_sequence_prefix": "pass",
+    "acknowledged_write_visibility": "pass",
+    "independent_answer_join": "pass"
+  },
+  "distance_check": {
+    "max_abs_error": 0.0,
+    "tolerance": "1e-6 + 1e-9*max(|reported|,|expected|)"
+  },
+  "verdict": "pass",
+  "notes": [
+    "Recall is scored against answers recomputed from base vectors plus the write log.",
+    "Protocol completeness is not evidence that the 0.85 recall target was reached."
+  ]
+}
