@@ -95,7 +95,7 @@ ReadRequest 持有 FileLease 和 BufferLease，校验 `block.file_id == file.Id(
 | WalWriter::Sync | 同步所有此前追加的数据并返回状态；组提交由上层控制 |
 | WalWriter::Rotate / Close | 组边界同步后轮换、关闭；错误后禁止通过轮换绕过恢复 |
 
-BlockReader::ReadBatch 返回按输入排序的只读 BlockLease，TryPrefetch 非阻塞准入；FileRegistry 提供持有引用后的延迟回收；ResourceGovernor 负责带生命周期的内存预约与模式切换。详细所有权、计量与失败约束见 [A 侧契约](stage3-a-contract.md)。IndexAdapter、DeltaStore、候选扩展和快照内部类型由 INDEX-B-1.1 给出声明（[index.hpp](../include/agent_io/index.hpp)）：WriteSlot 显式接收全局序号，读取携带捕获的 DeltaPin，ScratchRequest 补齐段数、预算及 PQ 上界。语义见 [B 侧契约](stage3-b-contract.md)；这些仍是声明而非实现，不能据此宣称整个第三阶段已冻结。
+BlockReader::ReadBatch 返回按输入排序的只读 BlockLease，TryPrefetch 非阻塞准入；FileRegistry 提供持有引用后的延迟回收；ResourceGovernor 负责带生命周期的内存预约与模式切换。详细所有权、计量与失败约束见 [A 侧契约](stage3-a-contract.md)。IndexAdapter、DeltaStore、候选扩展和快照内部类型以冻结的 INDEX-B-1.2 为准（[index.hpp](../include/agent_io/index.hpp)）：WriteSlot 显式接收全局序号，读取携带捕获的 DeltaPin，ScratchRequest 覆盖段数、预算及 PQ/导航上界。完整 Manifest 类型与逻辑读取/预取统计见 [B 侧契约](stage3-b-contract.md)。2026 年 11 月 17 日联合复核已完成，第三阶段设计冻结，依据见[冻结记录](stage3-freeze.md)；索引仍是声明，运行时验收另行完成。
 
 INDEX-B-1.1 的复审补充：ReadView/DeltaPin 为非所有权元数据，读取方法接收 ReadViewLease，由预先准备的生命周期对象固定段、增量和预算；未发布的最后预留槽可在 WAL 追加前 CancelLastSlot。Expand 显式接收 K，Refine 通过 RefinementRequest 接收租约、预算与同一查询期限；工作区包括两份重叠候选数组和导航上界。以上仅为声明，不是生命周期或并发实现验收。
 
@@ -106,6 +106,8 @@ INDEX-B-1.1 的复审补充：ReadView/DeltaPin 为非所有权元数据，读�
 BufferLease 的可写入口只供后端或填充者使用，缓存发布后只读；同一缓冲不允许被多个在途写填充。缓冲池保证地址稳定与明确容量，不能将普通 vector 地址直接假定为无缓冲 I/O 合法地址。
 
 ## 6 契约演进
+
+2026 年 11 月 17 日冻结组合：API-1.2 / STORAGE-A-1.1 / INDEX-B-1.2 / FORMAT-1 / EVAL-1.1，对应 DESIGN-1.1。清单此前未实现，本次首次固定完整 JSON schema；公开 API 与运行输出字段未变。
 
 公开类型或语义改变时修改 API 版本并更新头文件、文档、基准与调用示例。单纯新增计数不改变已存在字段含义。阶段二若证实依赖无法走该读接口，先记录决策并修改契约，不在实现中绕过后仍声称符合设计。
 

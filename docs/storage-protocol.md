@@ -4,6 +4,8 @@
 
 2026 年 11 月 11 日增加 A 侧编码/解码、追加、同步、轮换和回收交接，见 [STORAGE-A-1](stage3-a-contract.md)和 [storage.hpp](../include/agent_io/storage.hpp)，不改变 FORMAT-1 字段、字节序或 CRC 范围。编解码只有声明，恢复及发布编排仍属 B，尚无进程恢复测试结果。
 
+2026 年 11 月 17 日冻结补充：清单 JSON 与 INDEX-B-1.2 的定长内存类型逐字段对应，规则见第 2.1 节。WAL 和版本目录字节布局不变；此前未实现清单编码，本次首次明确其完整 schema。[阶段三冻结记录](stage3-freeze.md)列出交接结论与后续实现验收。
+
 ## 1 所有权与目录
 
 ```text
@@ -59,6 +61,37 @@ segment.json 列出所有必需文件的长度、SHA256、原生格式和版本�
 每个不可变段内，一个逻辑 ID 只保存该段覆盖范围内最高版本；跨段仍可能有重复 ID。manifest/segment 元数据保存条数、记录大小和校验，文件本体不再有独立原生结构体头。字节序手工编码，禁止直接 dump C++ struct。
 
 版本目录按页二分或稀疏定位，稀疏信息占元数据预算，页经过相同读取与缓存。开启 direct_reads 时可将自有文件尾补零到探测对齐单位，真实逻辑长度另存；第三方文件的填充必须先证明不会破坏加载，不能盲目追加。
+
+### 2.1 清单 JSON 与内存类型
+
+唯一 schema 示例为 [manifest.json](../configs/examples/manifest.json)，声明见 [index.hpp](../include/agent_io/index.hpp)。示例哈希全部为零，是未对应实体文件的协议夹具，不能作为可打开索引；清单本身没有 EVAL 的 purpose/schema_version 字段。
+
+| JSON 字段 | C++ 来源及约束 |
+| --- | --- |
+| format_version / instance_id | Manifest 同名字段；版本为整数 1；非零 UUID，规范小写连字符表示，内存按 RFC 4122 字节序保存 |
+| generation / checkpoint_sequence / live_count | 同名 uint64，编码为规范十进制字符串；generation>0 |
+| dimension / metric / block_bytes | 正整数 dimension≤65536；metric 固定 squared_l2；block_bytes 为正的 uint32 二次幂，实际设备对齐另由 Open 验证 |
+| adapter | ManifestAdapter；name、完整 40 位小写 commit、native_version 各≤128 UTF-8 字节，parameters≤512 字节，均非空、无控制字符；原生版本未知时禁止发布可用清单 |
+| layout | NodeRecordLayout 的全部六个字段，均 uint32 JSON 整数；dimension 与清单一致，0<max_degree≤512，row_bytes 为 block_bytes 的正整数倍 |
+| segments | segment_count 个 ManifestEntry，最多 16 个；id/uuid 各自唯一；固定数组其余条目不参与编码 |
+| wal_replay_after | 同名字段，必须等于 checkpoint_sequence |
+
+layout 的三个不重叠区间分别为 vector_offset 起 dimension×4 字节、neighbor_offset 起 4+max_degree×4 字节（uint32 邻居数与节点号）、metadata_offset 起 16 字节（uint64 ID/版本），都不得超出 row_bytes。节点可以跨多个对齐块；实际原生布局不能满足时由适配器转换或返回 unsupported，不据此假定 DiskANN 原生行就是此布局。
+
+每个 segments 条目恰含以下字段：
+
+| JSON 字段 | 约束 |
+| --- | --- |
+| id / uuid | 非零 uint64 字符串及持久段 UUID；id 在同一索引实例内分配且不复用，重启从持久清单及已保留资源恢复分配水位 |
+| generation / kind / covered_sequence | 0<generation≤清单代次；kind 为 base/merged/flushed_delta；covered_sequence≤C，base 固定 0 |
+| node_count / file_bytes / content_sha256 | node_count 为正、≤2³²；主图物理文件字节为正且按 block_bytes 对齐，至少 node_count×row_bytes；主图完整物理内容 SHA256 |
+| metadata | ManifestFile，恰含 path、logical_bytes、physical_bytes、sha256；path 固定 segments/&lt;uuid&gt;/segment.json，≤1024 UTF-8 字节；0<logical_bytes≤physical_bytes，哈希覆盖完整物理文件 |
+
+SHA256 一律 64 位小写十六进制字符串，编码时由 Digest 转换。segment.json 再登记所有必需原生文件与 versions.bin 的相对路径、逻辑/物理长度、内容哈希及布局；这些文件引用均限制在该段目录内，不允许重解析点或路径逃逸。Open 先验证 CURRENT 中的清单哈希，再验证清单中 metadata 的长度/哈希，最后按 segment.json 验证必需文件和版本目录；不能只校验主图。段内布局须与当前清单 layout 一致，异构布局本版不支持。live_count≤段条数总和；段条数总和检查 uint64 溢出。没有段只允许 C=0、live_count=0。
+
+`ManifestText<N>` 显式 size≤N，不含终止符，未使用的字节为零。JSON 内存类型不直接落盘。`ManifestBytes` 校验全部输入后返回编码的准确字节数；`EncodeManifest` 的对象键顺序固定为 manifest.json 示例顺序（嵌套对象亦同），段数组按传入顺序，不序列化 segment_count。输出紧凑 UTF-8 JSON、无 BOM/尾换行/NUL。非 ASCII 字符直接编码 UTF-8，不做 Unicode 归一化；双引号与反斜杠分别写为 `\"` 与 `\\`，斜杠不转义；文本不允许控制字符。两者对非法输入、长度溢出或编码超过 65536 字节返回 invalid_argument；Encode 还先检查输出容量，任何失败均不得改写输出，成功只写前返回长度个字节。编码工作区也须预约。
+
+`DecodeManifest` 最多接收 65536 字节；解析完整 JSON，可接受首尾 JSON 空白，拒绝重复/未知/缺失字段、尾随非空白、错误类型、非规范数值、非法 UTF-8、非法路径、重复身份、越界与不一致布局，返回 corruption。合法但非 1 的格式版本返回 unsupported。它只能验证哈希字段的编码，文件内容哈希由 Open 验证；其接口没有文件系统输入，不能声称已核查磁盘内容。解码临时空间须有界并计入 workspace，返回对象占 metadata。本次只有声明与 schema 夹具校验，C++ 编解码及损坏文件测试留实现阶段。
 
 ## 3 WAL 记录 FORMAT-1
 
@@ -150,7 +183,7 @@ CRC32C 使用 Castagnoli 多项式，标准初始值及最终异或均为 0xffff
 
 这些是协议推演，不是故障测试结果。进程退出、系统掉电和物理设备故障是不同覆盖级别；本轮默认验收先覆盖本机 NTFS 进程恢复。切换到 Windows 后必须重新验证创建、替换失败及进程中断场景，持久化假设依赖实际系统、文件系统和设备兑现同步语义。
 
-## 8 平台依据与未冻结项
+## 8 平台依据与实现验证项
 
 - Microsoft Learn File Buffering：FILE_FLAG_NO_BUFFERING 对齐与缓存约束。
 - Microsoft Learn FlushFileBuffers：文件缓冲刷新与设备相关限制。

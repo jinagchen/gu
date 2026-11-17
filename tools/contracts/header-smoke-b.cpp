@@ -31,6 +31,19 @@ static_assert(std::is_same_v<decltype(RefinementRequest::budget), CandidateBudge
 static_assert(std::is_same_v<decltype(ScratchRequest{}.navigation_scratch_bytes),
                              std::optional<std::uint64_t>>);
 static_assert(std::is_trivially_copyable_v<Manifest>);
+static_assert(std::is_trivially_copyable_v<ManifestAdapter>);
+static_assert(std::is_trivially_copyable_v<ManifestFile>);
+static_assert(std::is_same_v<decltype(Manifest{}.adapter), ManifestAdapter>);
+static_assert(std::is_same_v<decltype(ManifestEntry{}.metadata), ManifestFile>);
+static_assert(std::is_same_v<decltype(ManifestEntry{}.uuid), InstanceId>);
+static_assert(std::is_same_v<decltype(Manifest{}.wal_replay_after), Sequence>);
+static_assert(Manifest{}.format_version == 1);
+static_assert(ManifestText<kManifestPathBytes>{}.bytes.size() == 1024);
+static_assert(kMaxManifestBytes == 65536);
+static_assert(std::is_same_v<decltype(ExpansionResult{}.logical_blocks_read),
+                             std::uint64_t>);
+static_assert(std::is_same_v<decltype(ExpansionResult{}.prefetched_keys_used),
+                             std::uint64_t>);
 static_assert(sizeof(ReadView) < 4096);
 
 // View capacity is the same constant the engine validates against, so the two
@@ -72,8 +85,7 @@ static_assert(std::is_same_v<decltype(DecodeManifest(
                                  std::declval<std::span<const std::byte>>())),
                              Result<Manifest>>);
 
-// Rows must stay addressable inside one block-sized unit; a node spanning more
-// than block_bytes is a configuration error, not a runtime surprise.
+// Rows may span multiple aligned blocks; Locate returns their full byte range.
 static_assert(std::is_trivially_copyable_v<NodeRecordLayout>);
 static_assert(SegmentKind::base != SegmentKind::merged);
 static_assert(ExpansionState::budget_exhausted != ExpansionState::exhausted);

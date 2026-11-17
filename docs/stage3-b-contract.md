@@ -1,6 +1,6 @@
 # 第三阶段 B 侧索引、增量与动态评测契约
 
-日期：2026 年 11 月 17 日。版本 INDEX-B-1.1，对应 API-1.2、EVAL-1.1、STORAGE-A-1 与 DESIGN-1.1；FORMAT-1 字节布局保持不变。本次修订补齐全局序号、捕获前缀和工作区参数，并移除输入轨迹对实际提交和快照的预测。旧 INDEX-B-1 轨迹中的 sequence / committed_prefix_at_arrival 不再合法，须重新生成；查询、写入输出工件的 EVAL-1.1 字段不变。声明位于 [index.hpp](../include/agent_io/index.hpp)，全部为声明，尚无 IndexAdapter、DeltaStore、首次构建或合并实现。
+日期：2026 年 11 月 17 日。冻结版本 INDEX-B-1.2，对应 API-1.2、EVAL-1.1、STORAGE-A-1.1 与 DESIGN-1.1；FORMAT-1 的 WAL 字节布局保持不变。1.1 补齐全局序号、捕获前缀和工作区参数，并移除输入轨迹对实际提交和快照的预测；1.2 补齐清单类型及逻辑读取/预取诊断计量。旧 INDEX-B-1 轨迹中的 sequence / committed_prefix_at_arrival 不再合法，须重新生成；查询、写入输出工件的 EVAL-1.1 字段不变。声明位于 [index.hpp](../include/agent_io/index.hpp)，全部为声明，尚无 IndexAdapter、DeltaStore、首次构建或合并实现。交接结论见[冻结记录](stage3-freeze.md)。
 
 ## 1 范围与交接
 
@@ -40,7 +40,9 @@ B 不重新发明磁盘图算法。底层构图与原生格式沿用已固定的
 - 合并顺序：按 `(exact_distance 或 compressed_distance, VectorId)` 升序；同 ID 只保留快照内最高可见版本；合并后超过 `total_limit` 时截断并置 `candidate_limit_reached = true`。
 - `ExpansionState` 语义固定：`exhausted` 表示图遍历自然结束；`more_available` 表示上游仍有未展开节点，因期限或预算停止；`budget_exhausted` 表示 `total_limit` 或 `per_segment_limit` 用尽。三者都可能是成功返回。
 - 扩大候选预算即重新调用 `Expand`：初版不提供可恢复游标，必须从入口点重新开始；`ExpansionResult` 只报本次调用计数，不累加上一次。可恢复游标属后续替换项，不能在文档中提前宣称。
-- 计数口径：`blocks_read` 与 `bytes_read` 是经 BlockReader 的去重后真实块数与字节；`prefetch_admitted` 来自 `TryPrefetch` 的 admitted，`prefetch_consumed` 每个驻留周期最多记一次，多个等待者不重复计成功。
+- 计数口径：`logical_blocks_read`/`logical_bytes_read` 只累计本次 Expand 成功需求读取返回的块条数及 key.byte_count 之和；重复输入、缓存命中和共享在途仍各计一次，失败整批不计成功获取，Refine 的读取不混入 Expand。两者不是后端提交/完成量。`prefetch_admitted` 只数本次 TryPrefetch 返回 admitted 的次数，不含 already_present/dropped；`prefetched_keys_used` 是本次 Expand 曾 admitted 且后来被本次成功需求获取的不同完整 BlockKey 数，单次 Expand 每键最多一次。它只是本查询的使用诊断，其他查询消费、同键多次驻留和失败均会使它不同于引擎计数；不得求和后冒充 EngineStats.prefetch_consumed。
+- 后端真实接管、完成字节和预取首次消费，以 A 的 EngineStats 和 EVAL-1.1 engine_counters 为唯一来源，不以并发前后 Stats 差值分摊到查询。全局 `prefetch_consumed` 在需求首次合入预取在途或命中其驻留块时计一次，即使后续读取失败也不撤销；淘汰后新接管预取才开始下一周期。需求接管的同键 I/O 不因后续 TryPrefetch.already_present 改成预取。所有内部计数检查 uint64 溢出。
+- 计算 prefetched_keys_used 所需键集合由候选/预取上限推导容量并计入 navigation_bytes；不能为诊断指标另开不受预算约束的容器。
 - `ExpansionRequest.k` 为本次查询 K，必须满足 0<k≤budget.total_limit；`deadline` 是当前进程 `steady_clock` 的绝对期限。到期限时若已获得不少于 min(K, live_count) 的有效候选，可成功返回并置 `more_available`；否则返回 `deadline_exceeded`，不得返回半批候选让上层误当成完整结果。最终查询仍须完成原向量精排。
 - `Refine(const RefinementRequest&)` 显式接收候选、查询向量、`ReadViewLease`、CandidateBudget 和同一查询期限；只对传入候选精排并再次过滤非当前可见版本，不得引入新候选。候选数超过 `budget.total_limit` 返回 `invalid_argument`；精排在期限内未完成则整个查询失败，不能重新起算超时。Expand/Refine 产生的 vector 容量均由调用方持有的查询预约覆盖，直到这些 vector 销毁，不在方法返回时提前释放预算。
 
@@ -128,14 +130,14 @@ ReserveSlot -> WriteSlot -> PublishPrefix（publication_mutex 下）
 构建流程：
 
 1. 校验输入哈希、维度、文件长度精确匹配与 ID 唯一；失败返回 `invalid_argument`，不创建 staging。
-2. 创建独立 Job 并设提交内存限额，启动构建（同进程受限线程或子进程均可，子进程不得逃逸 Job）。
+2. 离线首次构建创建独立 Job 并设提交内存限额，在恢复构建进程线程前加入 Job；失败即终止、不开始构建。在线维护使用引擎同一 Job 及后台 workspace 预约，不能复用离线独立计量域绕开总额，详见 A 契约第 3 节。
 3. 在 staging 生成段文件与版本目录，逐个 `FlushFileBuffers` 后关闭句柄。
 4. 计算内容 SHA256、记录 `node_count`、`file_bytes`、`peak_commit_bytes`。
-5. 写清单临时文件并刷盘，再发布为 `manifest-<generation>.json`。
+5. 按 FORMAT-1 第 5 节将段同卷移到 segments 的唯一正式目录后，写清单临时文件并刷盘，再发布为 `manifest-<generation>.json`；禁止清单引用仍在 staging 的文件。
 6. 写 `CURRENT` 临时文件并刷盘，按 FORMAT-1 第 5 节替换；失败时保留旧 `CURRENT` 并进入需诊断状态。
 7. 新清单持久发布后才切换视图；首次构建 `checkpoint_sequence = 0`。
 
-失败语义：`published = false`，不覆盖任何可用 `CURRENT`；staging 残留计入磁盘占用，不报告成功；构建内存超限按 `resource_exhausted`，输入损坏按 `corruption`，依赖不具备有界分配能力按 `unsupported`。构建期间不得与查询共用同一内存计量域，否则峰值与召回实验都不可比。
+失败语义：`published = false`，发布前的构建失败保留已有可用 `CURRENT`；CURRENT 替换报错时按 FORMAT-1 核查实际状态，不能假定系统自动回滚。staging 残留计入磁盘占用，不报告成功；构建内存超限按 `resource_exhausted`，输入损坏按 `corruption`，依赖不具备有界分配能力按 `unsupported`。离线首次构建与查询分开计量；在线合并必须和查询共用引擎受限域，其干扰属于动态评测成本。
 
 `native_version` 记录依赖的实际版本标识。构建产物是本项目自有格式，不等于 DiskANN 原生索引可直接加载；两者关系须在交付文档中写明。
 
@@ -144,9 +146,9 @@ ReserveSlot -> WriteSlot -> PublishPrefix（publication_mutex 下）
 `Manifest` 定长可拷贝，`kMaxManifestSegments = 16`：
 
 - `generation` 单调递增；`checkpoint_sequence` 为清单覆盖的最大提交序号；`live_count` 为清单内有效去重 ID 数。
-- `segments[]` 每项包含段身份、代次、种类、覆盖序号、条数、字节数与内容哈希；`segment_count ≤ 16`，越界即 `corruption`。
+- `segments[]` 每项包含段 ID/UUID、代次、种类、覆盖序号、条数、主图字节/哈希，以及 segment.json 的路径、逻辑/物理字节和哈希；`segment_count ≤ 16`，越界即 `corruption`。adapter、格式版本与 wal_replay_after 均在 Manifest 内显式提供，定长 ManifestText 不在发布时分配。
 - 发布顺序固定为：段与目录已刷盘 → 清单临时文件刷盘并改名 → `CURRENT` 刷盘替换。任何一步失败禁止删除旧文件与日志。
-- `ManifestBytes` / `EncodeManifest` / `DecodeManifest` 为声明：`EncodeManifest` 容量不足时不写任何字节并返回 `invalid_argument`；`DecodeManifest` 校验长度、版本、条数与哈希，不一致返回 `corruption`，不猜测修复。
+- `ManifestBytes` / `EncodeManifest` / `DecodeManifest` 为声明，完整字段、64 KiB 上限、容量、错误与 UTF-8 JSON 规则唯一以 [FORMAT-1 第 2.1 节](storage-protocol.md#21-清单-json-与内存类型)为准。Decode 只核查哈希字段格式，Open 另外验证 CURRENT、segment.json 及其全部文件内容哈希，不能让纯 span 解码接口声称检查了磁盘。
 
 版本目录：
 
@@ -208,7 +210,7 @@ ReserveSlot -> WriteSlot -> PublishPrefix（publication_mutex 下）
 | 构建申请超过 `memory_limit_bytes` | 构建返回 `resource_exhausted`，`published = false`，`CURRENT` 不变 | Job 拒绝分配，staging 残留计磁盘，不删旧文件 |
 | 版本目录页被缓存驱逐后 Q2 查同一 ID | `Find` 重新读取；稀疏索引占 metadata，块按 A 分区计费；读取失败使整个查询 `io_error`，不降级为"无此 ID" | 需求读优先于预取，失败扇出给全部等待者 |
 | PQ 码表 12 MiB 未纳入预算 | 披露 `unbudgeted_metadata_bytes = 12582912`，内存结论单列，不并入引擎占比 | 该分配不经 BlockReader，按绕行登记，不重复计 cache |
-| 预取 admitted 8 块，查询在第 3 块后早退 | `prefetch_admitted = 8`、`prefetch_consumed = 3`，节流比如实报告 | 已接管 I/O 继续持有租约直至回调整完成，随后入缓存 |
+| 本次 Expand admitted 8 个不同键，成功需求获取其中 3 个后结束，另一个查询也消费其中 1 个 | `prefetch_admitted = 8`、`prefetched_keys_used = 3`；不据此推断全局消费为 3 | 无其他交错时全局 submitted=8、consumed=4；已接管 I/O 持有租约至完成，不重复计两查询共享的首次消费 |
 
 以上为设计推演。DeltaStore 并发发布、跨段版本合并、构建失败回滚与目录换页仍须在实现阶段做专项故障测试。
 

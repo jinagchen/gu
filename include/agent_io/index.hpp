@@ -1,6 +1,6 @@
 #pragma once
 
-// Internal contract for the index side (INDEX-B-1.1). Public Engine API stays at
+// Internal contract for the index side (INDEX-B-1.2). Public Engine API stays at
 // API-1.2; these declarations are for A/B integration only and are not a
 // stable ABI. No implementation is supplied here.
 
@@ -30,6 +30,10 @@ inline constexpr std::size_t kMaxDeltaPins = 4;
 inline constexpr std::size_t kMaxManifestSegments = 16;
 inline constexpr std::size_t kSha256Bytes = 32;
 inline constexpr std::size_t kInstanceIdBytes = 16;
+inline constexpr std::size_t kManifestPathBytes = 1024;
+inline constexpr std::size_t kManifestNameBytes = 128;
+inline constexpr std::size_t kManifestParameterBytes = 512;
+inline constexpr std::size_t kMaxManifestBytes = 65536;
 
 using Digest = std::array<std::byte, kSha256Bytes>;
 using InstanceId = std::array<std::byte, kInstanceIdBytes>;
@@ -203,10 +207,14 @@ struct ExpansionRequest {
 
 struct ExpansionResult {
     std::vector<Candidate> candidates;
-    std::uint32_t blocks_read = 0;
-    std::uint64_t bytes_read = 0;
-    std::uint32_t prefetch_admitted = 0;
-    std::uint32_t prefetch_consumed = 0;
+    // Successful demand acquisitions, including cache hits and shared reads.
+    // Backend submissions and completed bytes belong to EngineStats only.
+    std::uint64_t logical_blocks_read = 0;
+    std::uint64_t logical_bytes_read = 0;
+    std::uint64_t prefetch_admitted = 0;
+    // Distinct keys admitted by this Expand and later acquired by its demands.
+    // This query-local diagnostic is not EngineStats::prefetch_consumed.
+    std::uint64_t prefetched_keys_used = 0;
     bool candidate_limit_reached = false;
     ExpansionState state = ExpansionState::exhausted;
 };
@@ -282,8 +290,8 @@ struct ScratchRequest {
 
 Result<ScratchPlan> ComputeScratchPlan(const ScratchRequest& request);
 
-// First-build input. The build runs in its own Job object with
-// memory_limit_bytes; staging_directory must be unique and ASCII-only.
+// First-build input. Offline builds run in their own Job; online maintenance
+// children share the engine Job and also retain a workspace reservation.
 struct BuildRequest {
     std::filesystem::path vectors_path;
     std::filesystem::path ids_path;
@@ -320,32 +328,63 @@ struct BuildOutcome {
     bool published = false;
 };
 
+// UTF-8 bytes with explicit length, no terminator; unused bytes must be zero.
+// Fixed storage keeps the manifest copyable without allocating during publish.
+template <std::size_t Capacity>
+struct ManifestText {
+    std::uint32_t size = 0;
+    std::array<char, Capacity> bytes{};
+};
+
+struct ManifestAdapter {
+    ManifestText<kManifestNameBytes> name;
+    ManifestText<kManifestNameBytes> commit;
+    ManifestText<kManifestNameBytes> native_version;
+    ManifestText<kManifestParameterBytes> parameters;
+};
+
+struct ManifestFile {
+    ManifestText<kManifestPathBytes> path;
+    std::uint64_t logical_bytes = 0;
+    std::uint64_t physical_bytes = 0;
+    Digest sha256{};
+};
+
 struct ManifestEntry {
     SegmentId id = 0;
+    // Persistent UUID; the uint64 id is the instance-local index reference.
+    InstanceId uuid{};
     Generation generation = 0;
     SegmentKind kind = SegmentKind::base;
     Sequence covered_sequence = 0;
     std::uint64_t node_count = 0;
     std::uint64_t file_bytes = 0;
     Digest content_sha256{};
+    // segment.json describes native files, layout, checksums and versions.bin.
+    ManifestFile metadata;
 };
 
 // Bounded, copyable manifest. Publishing replaces CURRENT only after this
 // manifest and every referenced file are durable.
 struct Manifest {
+    std::uint32_t format_version = 1;
     InstanceId instance_id{};
     Generation generation = 0;
     Sequence checkpoint_sequence = 0;
     std::uint32_t dimension = 0;
     Metric metric = Metric::squared_l2;
     std::uint32_t block_bytes = 4096;
+    ManifestAdapter adapter;
     NodeRecordLayout layout;
     std::array<ManifestEntry, kMaxManifestSegments> segments{};
     std::uint32_t segment_count = 0;
     std::uint64_t live_count = 0;
+    Sequence wal_replay_after = 0;
 };
 
-// Declaration-only manifest codecs; callers supply already reserved storage.
+// FORMAT-1 UTF-8 JSON, bounded by kMaxManifestBytes, never a struct dump.
+// Bytes/Encode reject invalid input; Encode errors leave output untouched.
+// Decode checks the entire JSON; Open separately verifies CURRENT and files.
 Result<std::uint64_t> ManifestBytes(const Manifest& manifest);
 Result<std::uint64_t> EncodeManifest(const Manifest& manifest,
                                      std::span<std::byte> output);
