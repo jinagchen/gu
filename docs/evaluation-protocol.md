@@ -53,7 +53,17 @@ io_backend 当前取 synchronous 或 windows_iocp。Windows 内存约束和观�
 
 有限时长运行还须输出停止后的最终写入清单，确保包含“先发布、查询已经看见、响应稍后到达”的组成员；记录不完整时不能继续计算一个看似精确的动态召回。
 
-轨迹与工件的关联由 `evaluation.check` 强制校验，不再只靠人工核对：轨迹行须带 `schema_version` / `protocol_version` / `purpose` / `run_id`，`arrival_index` 从 0 稠密递增；`trace.operations` 与 `trace.queries` 必须等于实际写入与查询行数；`queries.jsonl` 的 `snapshot_sequence` 必须等于轨迹记录的到达前缀，且不得超过此前已到达的写入数；`trace.sha256` 非空时必须匹配文件内容；`dataset.query_count` 必须等于 `queries.jsonl` 行数。轨迹文件须位于运行目录内（相对路径、不含 `..`），不能从目录外引用。
+2026 年 11 月 17 日修订为 INDEX-B-1.1：输入轨迹只定义请求与到达顺序，不携带预测的 sequence 或 committed_prefix_at_arrival。写入的全局序号来自实际 WriteReceipt，查询快照来自进入 Search 后捕获的 ReadView；它们不能从输入到达数推出。失败/拒绝查询的 null 快照与零分合法，失败/拒绝写入不占用成功收据序号。
+
+`evaluation.check` 核对各工件的运行身份、跨查询和写入的 operation_id 唯一性、轨迹与终结记录一一关联、写入操作/ID/载荷行，以及 query.ids.u64 的 ID/行号映射。trace.operations/queries 是请求数，终结记录加 pending 必须与之守恒；dataset.query_count 是源查询向量和 ID 文件行数，允许不同请求复用同一查询。所有输入文件和轨迹的哈希均校验，路径解析后也须留在运行目录内。旧 INDEX-B-1 输入轨迹须重新生成。
+
+测量成功收据必须覆盖 (measurement_start_sequence, measurement_end_sequence]，按序号重建而不要求响应顺序递增；查询 S 在该区间边界内，并按严格时钟先后验证已确认写可见性。非零起点要求显式 baseline 及逐行版本文件，详见 [B 侧契约](stage3-b-contract.md)第 10 节。upsert 对新 ID 插入，成功查询必须返回 min(K,live_count) 个邻居。
+
+复审补充：时钟检查覆盖全部成功读写的发布前缀，禁止非重叠写收据倒序、后续查询快照回退或已观察前缀之后发布较低序号；重叠调用与相等刻度允许不同顺序。不完整轮次仍校验邻居类型、范围与排序。无删除模型的基线非零版本唯一、最大版本等于起点；答案不接受轨迹外操作或多余快照。正式测量还逐项检查外部 Job 指标、资源采样和预算外元数据披露的一致性；这些文件校验不能证明自述证据的来源真实性，不代表资源或性能验收。
+
+正式测量的实际 direct_reads 必须为布尔值并与配置一致，资源采样中的累计 Job 峰值不得回退。分配被拒后原始内核高水位可能超过 Job 限额，不能据此抹掉或改写证据；evaluation.json 的 resource_evidence 保留原值，标记 memory_acceptance=not_evaluated，超限时转为 requires_review、不计分并退出 2，待资源核查。该状态也不直接证明成功提交量或物理内存超限，详见[Windows 平台约定](windows-platform.md)第 3 节。
+
+答案文件和 environment.json 是必需工件。evaluation.check 的退出码 0 表示完整工件已计分，1 表示工件无效，2 表示 incomplete/requires_review 且不计分；输出保留标志，invalid 会替换旧评估结论。退出 0 和合成 Recall=1.0 均不能单独当作正式召回、内存或性能验收通过。
 
 ## 4 到达、计时与结束
 

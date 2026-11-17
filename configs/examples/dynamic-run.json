@@ -109,7 +109,7 @@
     "Dynamic runs must keep the trace fixed so answers are comparable across configurations.",
     "trace.operations counts writes only; operations + queries equals the trace row count.",
     "The three workload fractions must match the referenced trace (6 queries, 4 inserts, 6 upserts of 16); a conflict is a configuration error, not a reason to resample.",
-    "snapshot_sequence is captured per query; the trace only fixes arrival order, not publication order.",
+    "INDEX-B-1.1: the trace fixes requests and arrival order; receipts and snapshots come only from actual API results.",
     "queries that never reach the API use a null snapshot and count as failures, not fabricated answers."
   ]
 }

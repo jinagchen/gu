@@ -25,7 +25,7 @@
 
 2026 年 11 月 15 日补齐 A 侧静态 C++ 并发基准运行器：`agent_io_benchmark`、`vector_bench` 的有界队列/结果槽、独立日志、阶段计时、吞吐与延迟直方图、资源采样及 EVAL-1.1 工件输出。显式 `contract-test` 目标验证生产端，拒绝正式 measurement；真实 Engine 目标仍待 B 接入，第四阶段整体验收尚未完成。命令与接入边界见[基准交付记录](docs/stage4-a-benchmark.md)。
 
-2026 年 11 月 16 日交付第三阶段 B：`index.hpp` 给出索引与增量内部契约，配置补上首次构建与动态运行，Python 侧补齐轨迹生成（`evaluation.trace`）与运行校验/召回（`evaluation.check`），并附 15 个反例的契约自查。索引层仍是声明，样例召回 1.0 来自精确扫描，不是性能或近似算法结论。见[B 侧交付记录](docs/stage3-b-completion.md)。
+2026 年 11 月 16 日交付第三阶段 B；11 月 17 日修订为 INDEX-B-1.1，修复动态快照、结果关联、upsert、计数和输入校验，补齐 DeltaStore 全局序号/捕获前缀及 ScratchRequest 参数。输入轨迹不再预设写序号或查询快照，旧轨迹须重新生成。索引层仍是声明，合成召回 1.0 来自精确扫描，不作为性能或近似算法结论。见[B 侧交付记录](docs/stage3-b-completion.md)。
 
 ## 两人分工
 
@@ -96,10 +96,11 @@ Python 侧校验命令（使用 `.venv` 中的解释器）：
 
 ```powershell
 python tools/contracts/check-stage3-b.py
+python tools/contracts/test-stage3-b.py
 python -m evaluation.check --run evaluation/examples/stage3-b
 ```
 
-第一条覆盖配置规则与 15 个反例；第二条对一个运行目录做协议校验并计算 Recall@10，结果写入该目录的 evaluation.json。
+前两条检查配置、30 个原有反例和动态回归场景；最后一条校验运行目录并计算 Recall@10，结果写入该目录的 evaluation.json。退出 1 为工件无效，退出 2 为 incomplete/requires_review、不计召回；退出 0 仅表示完整工件已计分。测试和声明通过后仍需双方接口复核，DESIGN-1.1 尚未冻结。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
 

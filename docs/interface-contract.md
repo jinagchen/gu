@@ -95,7 +95,9 @@ ReadRequest 持有 FileLease 和 BufferLease，校验 `block.file_id == file.Id(
 | WalWriter::Sync | 同步所有此前追加的数据并返回状态；组提交由上层控制 |
 | WalWriter::Rotate / Close | 组边界同步后轮换、关闭；错误后禁止通过轮换绕过恢复 |
 
-BlockReader::ReadBatch 返回按输入排序的只读 BlockLease，TryPrefetch 非阻塞准入；FileRegistry 提供持有引用后的延迟回收；ResourceGovernor 负责带生命周期的内存预约与模式切换。详细所有权、计量与失败约束见 [A 侧契约](stage3-a-contract.md)。IndexAdapter、DeltaStore、候选扩展和快照内部类型由 INDEX-B-1 给出声明（[index.hpp](../include/agent_io/index.hpp)），语义见 [B 侧契约](stage3-b-contract.md)；这些仍是声明而非实现，不能据此宣称整个第三阶段已冻结。
+BlockReader::ReadBatch 返回按输入排序的只读 BlockLease，TryPrefetch 非阻塞准入；FileRegistry 提供持有引用后的延迟回收；ResourceGovernor 负责带生命周期的内存预约与模式切换。详细所有权、计量与失败约束见 [A 侧契约](stage3-a-contract.md)。IndexAdapter、DeltaStore、候选扩展和快照内部类型由 INDEX-B-1.1 给出声明（[index.hpp](../include/agent_io/index.hpp)）：WriteSlot 显式接收全局序号，读取携带捕获的 DeltaPin，ScratchRequest 补齐段数、预算及 PQ 上界。语义见 [B 侧契约](stage3-b-contract.md)；这些仍是声明而非实现，不能据此宣称整个第三阶段已冻结。
+
+INDEX-B-1.1 的复审补充：ReadView/DeltaPin 为非所有权元数据，读取方法接收 ReadViewLease，由预先准备的生命周期对象固定段、增量和预算；未发布的最后预留槽可在 WAL 追加前 CancelLastSlot。Expand 显式接收 K，Refine 通过 RefinementRequest 接收租约、预算与同一查询期限；工作区包括两份重叠候选数组和导航上界。以上仅为声明，不是生命周期或并发实现验收。
 
 同步后端允许在 Submit 内完成；IOCP 后端为每个请求保留独立 OVERLAPPED，完成线程通过 GetQueuedCompletionStatus 取得结果。ReadFile 返回 ERROR_IO_PENDING 表示已接管；立即成功也须遵守默认 IOCP 完成包规则，不重复通知。初版禁止设置跳过成功完成通知的模式。同步提交失败且未接管时不等待完成包；带非空 OVERLAPPED 的失败完成仍须归还在途资源。短读不能当作完整块，对齐模式下不盲目用未对齐尾缓冲重试。
 
