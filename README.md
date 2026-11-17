@@ -40,7 +40,8 @@ Copyright 2026 proj47-RecallFlow contributors.
 - [存储格式与恢复](docs/storage-protocol.md)：WAL 字节布局、清单、发布与恢复时序。
 - [评测协议](docs/evaluation-protocol.md)：C++/Python 边界、快照答案、时间与结果工件。
 - [第三阶段 A 交付](docs/stage3-a-completion.md)：API-1.2 读取/资源/WAL 声明、预算切换及 EVAL-1.1 基准输出与自检。
-- [第三阶段 B 交付](docs/stage3-b-completion.md)：索引/增量内部契约、首次构建与动态运行配置、轨迹与独立答案的生成和校验；联合复核仍待完成。
+- [第三阶段 B 交付](docs/stage3-b-completion.md)：索引/增量内部契约、首次构建与动态运行配置、轨迹与独立答案的生成和校验。
+- [第三阶段联合复核与冻结](docs/stage3-freeze.md)：2026 年 11 月 17 日关闭五处交接，冻结 DESIGN-1.1、STORAGE-A-1.1 与 INDEX-B-1.2，第三阶段设计验收通过。
 
 公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 与索引层仍只有声明，同步存储已有独立实现，尚不能链接成完整引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
@@ -49,6 +50,8 @@ Copyright 2026 proj47-RecallFlow contributors.
 2026 年 11 月 15 日补齐 A 侧静态 C++ 并发基准运行器：`agent_io_benchmark`、`vector_bench` 的有界队列/结果槽、独立日志、阶段计时、吞吐与延迟直方图、资源采样及 EVAL-1.1 工件输出。显式 `contract-test` 目标验证生产端，拒绝正式 measurement；真实 Engine 目标仍待 B 接入，第四阶段整体验收尚未完成。命令与接入边界见[基准交付记录](docs/stage4-a-benchmark.md)。
 
 2026 年 11 月 16 日交付第三阶段 B；11 月 17 日修订为 INDEX-B-1.1，修复动态快照、结果关联、upsert、计数和输入校验，补齐 DeltaStore 全局序号/捕获前缀及 ScratchRequest 参数。输入轨迹不再预设写序号或查询快照，旧轨迹须重新生成。索引层仍是声明，合成召回 1.0 来自精确扫描，不作为性能或近似算法结论。见[B 侧交付记录](docs/stage3-b-completion.md)。
+
+2026 年 11 月 17 日按用户指示完成 A/B 跨模块联合复核：统一旧资源回收、预算与构建 Job 边界，INDEX-B-1.2 补齐 Manifest 的恢复引用和逻辑读取/预取诊断；DESIGN-1.1 已冻结。记录注明由 Codex 执行复核，不虚构两名成员签字；实现与性能继续按后续阶段验收。
 
 ## 两人分工
 
@@ -123,7 +126,7 @@ python tools/contracts/test-stage3-b.py
 python -m evaluation.check --run evaluation/examples/stage3-b
 ```
 
-前两条检查配置、30 个原有反例和动态回归场景；最后一条校验运行目录并计算 Recall@10，结果写入该目录的 evaluation.json。退出 1 为工件无效，退出 2 为 incomplete/requires_review、不计召回；退出 0 仅表示完整工件已计分。测试和声明通过后仍需双方接口复核，DESIGN-1.1 尚未冻结。
+前两条检查配置、30 个原有反例和动态回归场景；最后一条校验运行目录并计算 Recall@10，结果写入该目录的 evaluation.json。退出 1 为工件无效，退出 2 为 incomplete/requires_review、不计召回；退出 0 仅表示完整工件已计分。DESIGN-1.1 已按[冻结记录](docs/stage3-freeze.md)完成复核；新增清单 schema 检查运行 `python tools/contracts/test-stage3-freeze.py`，不替代真实 Engine 验收。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
 

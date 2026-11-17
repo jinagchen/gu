@@ -4,9 +4,9 @@
 
 当前有设计、声明式头文件、协议示例、Windows 环境/内存探针及 DiskANN 同步读取验证适配，尚无完整 Engine。阶段二已通过本机小规模工程可行性验收，依赖准确提交、读路径、容量粗算及计量证据见[验收记录](stage2-completion.md)。规模化性能、动态合并及官方内存口径仍待后续验证。平台边界见 [Windows 平台约定](windows-platform.md)。
 
-2026 年 11 月 11 日补充第三阶段 A 交付 STORAGE-A-1/API-1.2/EVAL-1.1：只读块租约、批读取、在途去重边界、文件延迟回收、资源预约与模式切换、WAL 编解码及基准输出契约已给出。详见 [A 侧存储与基准契约](stage3-a-contract.md)及[交付记录](stage3-a-completion.md)。2026 年 11 月 16 日补充第三阶段 B 交付 INDEX-B-1：索引适配、稳定增量槽、快照内部类型、RequiredScratch、首次构建受限域、清单与版本目录契约，以及 Python 轨迹与召回校验，见 [B 侧契约](stage3-b-contract.md)及[交付记录](stage3-b-completion.md)。两侧均只有声明与夹具，DESIGN-1.1 不据此宣称整体冻结。
+2026 年 11 月 11 日补充第三阶段 A 交付 STORAGE-A-1/API-1.2/EVAL-1.1：只读块租约、批读取、在途去重边界、文件延迟回收、资源预约与模式切换、WAL 编解码及基准输出契约已给出。详见 [A 侧存储与基准契约](stage3-a-contract.md)及[交付记录](stage3-a-completion.md)。2026 年 11 月 16 日补充第三阶段 B 交付 INDEX-B-1：索引适配、稳定增量槽、快照内部类型、RequiredScratch、首次构建受限域、清单与版本目录契约，以及 Python 轨迹与召回校验，见 [B 侧契约](stage3-b-contract.md)及[交付记录](stage3-b-completion.md)。
 
-2026 年 11 月 17 日修订为 INDEX-B-1.1：增量写槽显式接收全局序号，读取验证捕获前缀，工作区参数覆盖段数/预算/PQ；评测按实际 API 快照和成功收据计算，不由输入到达顺序预设结果。修复与专项回归见 B 交付记录，修订后的接口待双方复核。
+2026 年 11 月 17 日先修订 INDEX-B-1.1 的序号、前缀与工作区边界，随后按用户指示完成 A/B 联合复核，冻结 DESIGN-1.1。最终契约为 STORAGE-A-1.1 / INDEX-B-1.2，补齐清单 schema 与逻辑读取计量；范围、五处交接与验收证据见[冻结记录](stage3-freeze.md)。本次冻结不表示完整 Engine 已实现。
 
 ## 1 设计目标
 

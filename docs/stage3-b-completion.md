@@ -1,6 +1,8 @@
 # 第三阶段 B 交付记录
 
-日期：2026 年 11 月 17 日。版本 INDEX-B-1.1，对应 API-1.2、EVAL-1.1、STORAGE-A-1。11 月 16 日首次交付 B 侧内部契约与动态评测；本次修复复核发现的语义、校验和接口缺口。**索引层本身仍未实现**：`index.hpp` 全是声明，没有 IndexAdapter、DeltaStore、构建或合并代码。修订后的接口待 A/B 联合复核，DESIGN-1.1 尚未冻结。
+日期：2026 年 11 月 17 日。初次复审版本 INDEX-B-1.1，对应 API-1.2、EVAL-1.1、STORAGE-A-1。11 月 16 日首次交付 B 侧内部契约与动态评测；本次修复复核发现的语义、校验和接口缺口。**索引层本身仍未实现**：`index.hpp` 全是声明，没有 IndexAdapter、DeltaStore、构建或合并代码。
+
+同日冻结更新：按用户指示完成 A/B 交接复核，当前 INDEX-B-1.2 补齐 Manifest 字段及逻辑读取/预取诊断，STORAGE-A-1.1 固定回收与 Job 边界；DESIGN-1.1 已冻结，第三阶段设计退出通过。详见[联合复核记录](stage3-freeze.md)。下文第 1 至 6 节保留先前修复时点的验证与 Git 状态，不代表当前提交状态；第 7 节列出五处交接的关闭依据。
 
 ## 1 交付物
 
@@ -136,12 +138,12 @@ Git 核验：修复工作树 HEAD 与本地 origin/B 均为 `ce4a853`，主工�
 | PQ 与原生加载期内存的实际字节 | 未知，依赖构建后测量 |
 | 并发发布下的前缀一致性 | 缺压力测试 |
 
-## 7 与 A 的待确认点
+## 7 与 A 的交接关闭
 
-1. `Retire` 的调用时机需要 B 的视图引用计数归零作为前置条件，A 不自行推断。
-2. 目录对象与稀疏定位占 metadata，块缓冲沿用 A 的 cache/workspace 计费；需联合验证驱逐压力与实际峰值。
-3. 构建子进程必须显式加入同一个 Job，A 的限额只对已加入进程生效。
-4. 预取计数口径：B 记 `admitted/consumed`，A 记真实提交与消费，两边差值需在联合复核时对齐。
-5. `Manifest` 的字节编码尚未实现，`EncodeManifest`/`DecodeManifest` 的容量与损坏语义需与 FORMAT-1 第 5 节逐条对齐。
+1. 已关闭：B 等旧发布者及 ReadViewLease 释放且满足持久发布/恢复前提后，锁外请求 Retire；A 继续保护独立块租约与在途读，最后引用释放后才删除。
+2. 已关闭：目录对象、稀疏定位与生命周期控制块占 metadata；块按 A 的 cache/workspace 固定归属，适配复制和 scratch 另计。驱逐压力与峰值转入实现验收。
+3. 已关闭：离线首建独立 Job，在线构建加入引擎同一 Job；挂起创建后先加入再恢复，失败终止，不能以独立子域绕开总额。
+4. 已关闭：B 使用 logical_blocks_read/logical_bytes_read、prefetch_admitted/prefetched_keys_used 作为本次 Expand 诊断；真实提交/完成/全局消费只取 A 的 EngineStats，不强行令两侧计数相等。
+5. 已关闭：INDEX-B-1.2 增补格式、适配器、WAL 回放边界、段 UUID 和 segment.json 引用；[FORMAT-1 第 2.1 节](storage-protocol.md#21-清单-json-与内存类型)固定完整 JSON、64 KiB 上限、容量/损坏语义与文件哈希核查分工，新增 22 项 schema 检查。C++ 编解码仍待实现。
 
-本次仅完成所列设计、消费端及回归修复；没有执行真实 Engine 动态负载、正式资源合规或性能验收，也不替代另一成员的接口审阅。
+本次设计退出已关闭；真实 Engine 动态负载、正式资源合规与性能验收仍留后续阶段。复核由 Codex 按用户指示执行，未记录另一名成员签字。
