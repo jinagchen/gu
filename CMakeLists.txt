@@ -8,6 +8,9 @@ endif()
 add_library(agent_io_contracts OBJECT tools/contracts/header-smoke.cpp)
 target_compile_features(agent_io_contracts PRIVATE cxx_std_20)
 
+add_library(agent_io_index_contracts OBJECT tools/contracts/header-smoke-b.cpp)
+target_compile_features(agent_io_index_contracts PRIVATE cxx_std_20)
+
 add_library(agent_io_storage STATIC
     src/storage/synchronous_storage.cpp src/storage/synchronous_block_reader.cpp)
 target_include_directories(agent_io_storage PUBLIC include)
@@ -42,7 +45,8 @@ target_compile_definitions(job_runner PRIVATE
 target_link_libraries(job_runner PRIVATE psapi)
 
 if(MSVC)
-    foreach(target agent_io_contracts agent_io_storage agent_io_benchmark benchmark_runner_test
+    foreach(target agent_io_contracts agent_io_index_contracts
+                   agent_io_storage agent_io_benchmark benchmark_runner_test
                    synchronous_storage_test
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
@@ -51,6 +55,8 @@ endif()
 
 # Reuse the pinned Boost 1.78 headers already installed for DiskANN. Core
 # storage and runner builds remain independent of this CLI-only JSON library.
+set(AGENT_IO_TEST_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe"
+    CACHE FILEPATH "Python for native producer and contract integration tests")
 find_path(AGENT_IO_BOOST_INCLUDE boost/json/src.hpp HINTS
     "${AGENT_IO_DISKANN_PACKAGES}/boost/lib/native/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/build/diskann/packages/boost/lib/native/include")
@@ -81,13 +87,18 @@ if(AGENT_IO_BOOST_INCLUDE)
     if(MSVC)
         target_compile_options(vector_bench PRIVATE /W4 /WX /permissive- /EHsc)
     endif()
-    set(AGENT_IO_TEST_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe"
-        CACHE FILEPATH "Python for native producer integration tests")
 else()
     message(STATUS "vector_bench CLI disabled: set AGENT_IO_BOOST_INCLUDE to pinned Boost 1.78")
 endif()
 
 enable_testing()
+if(EXISTS "${AGENT_IO_TEST_PYTHON}")
+    add_test(NAME stage3_b_contracts COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/check-stage3-b.py")
+    add_test(NAME stage3_b_regressions COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/test-stage3-b.py")
+    set_tests_properties(stage3_b_contracts stage3_b_regressions PROPERTIES TIMEOUT 60)
+endif()
 add_test(NAME benchmark_runner COMMAND benchmark_runner_test)
 set_tests_properties(benchmark_runner PROPERTIES TIMEOUT 30)
 if(TARGET vector_bench AND EXISTS "${AGENT_IO_TEST_PYTHON}")

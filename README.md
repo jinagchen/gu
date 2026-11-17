@@ -24,13 +24,16 @@
 - [C++ 接口约定](docs/interface-contract.md)：公开 API、错误、准入、所有权和内部读取契约。
 - [存储格式与恢复](docs/storage-protocol.md)：WAL 字节布局、清单、发布与恢复时序。
 - [评测协议](docs/evaluation-protocol.md)：C++/Python 边界、快照答案、时间与结果工件。
-- [第三阶段 A 交付](docs/stage3-a-completion.md)：API-1.2 读取/资源/WAL 声明、预算切换及 EVAL-1.1 基准输出与自检；B 侧及联合复核仍待完成。
+- [第三阶段 A 交付](docs/stage3-a-completion.md)：API-1.2 读取/资源/WAL 声明、预算切换及 EVAL-1.1 基准输出与自检。
+- [第三阶段 B 交付](docs/stage3-b-completion.md)：索引/增量内部契约、首次构建与动态运行配置、轨迹与独立答案的生成和校验；联合复核仍待完成。
 
-公开声明位于 [engine.hpp](include/agent_io/engine.hpp) 和 [storage.hpp](include/agent_io/storage.hpp)。Engine 仍只有声明，同步存储已有独立实现，尚不能链接成完整引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
+公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 与索引层仍只有声明，同步存储已有独立实现，尚不能链接成完整引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
 2026 年 11 月 12 日开始第四阶段 A：已新增可链接的 `agent_io_storage` 静态库，实现同步读取、文件/缓冲租约、预算预约和关闭缓存/预取的批读取，并接入现有 DiskANN 小数据探针。两次独立精确答案检查 Recall@10 均为 1.0，范围和命令见[同步存储交接记录](docs/stage4-a-storage.md)。
 
 2026 年 11 月 15 日补齐 A 侧静态 C++ 并发基准运行器：`agent_io_benchmark`、`vector_bench` 的有界队列/结果槽、独立日志、阶段计时、吞吐与延迟直方图、资源采样及 EVAL-1.1 工件输出。显式 `contract-test` 目标验证生产端，拒绝正式 measurement；真实 Engine 目标仍待 B 接入，第四阶段整体验收尚未完成。命令与接入边界见[基准交付记录](docs/stage4-a-benchmark.md)。
+
+2026 年 11 月 16 日交付第三阶段 B；11 月 17 日修订为 INDEX-B-1.1，修复动态快照、结果关联、upsert、计数和输入校验，补齐 DeltaStore 全局序号/捕获前缀及 ScratchRequest 参数。输入轨迹不再预设写序号或查询快照，旧轨迹须重新生成。索引层仍是声明，合成召回 1.0 来自精确扫描，不作为性能或近似算法结论。见[B 侧交付记录](docs/stage3-b-completion.md)。
 
 ## 两人分工
 
@@ -52,7 +55,7 @@
 
 ## 计划目录
 
-以下为目标结构。CMake 已可构建存储与基准库、相应测试、接口检查、Windows 环境探针、Job Object 启动器及可选 DiskANN 读取适配探针。已有固定 Boost 头文件时还构建 vector_bench；真实引擎、首次构建和正式评测入口尚未完成。
+以下为目标结构。CMake 已可构建存储与基准库、相应测试、接口检查、Windows 环境探针、Job Object 启动器及可选 DiskANN 读取适配探针。已有固定 Boost 头文件时还构建 vector_bench；真实引擎与首次构建尚未完成，Python 评测入口已可用。
 
 ```text
 CMakeLists.txt
@@ -96,6 +99,16 @@ ctest --test-dir build/windows -C Release -V
 ```
 
 当前命令构建同步存储及并发基准，验证存储、基准、环境与内存探针，不会产生完整 Engine。普通终端若无法找到 cmake，使用[环境记录中的随附工具路径](docs/environment-validation.md)。CLI 的协议验证命令见[基准交付记录](docs/stage4-a-benchmark.md)。
+
+Python 侧校验命令（使用 `.venv` 中的解释器）：
+
+```powershell
+python tools/contracts/check-stage3-b.py
+python tools/contracts/test-stage3-b.py
+python -m evaluation.check --run evaluation/examples/stage3-b
+```
+
+前两条检查配置、30 个原有反例和动态回归场景；最后一条校验运行目录并计算 Recall@10，结果写入该目录的 evaluation.json。退出 1 为工件无效，退出 2 为 incomplete/requires_review、不计召回；退出 0 仅表示完整工件已计分。测试和声明通过后仍需双方接口复核，DESIGN-1.1 尚未冻结。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
 
