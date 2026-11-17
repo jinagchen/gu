@@ -2,6 +2,14 @@
 
 日期：2026 年 11 月 10 日。准确版本见 [依赖锁定](../configs/dependencies.lock.json)，Python 全部直接和传递依赖见 [requirements.lock.txt](../evaluation/requirements.lock.txt)。本表记录本地包中的许可证声明，不替代官方依赖准入要求 Q-09。
 
+## 项目许可与第三方材料
+
+2026 年 11 月 17 日确定：团队自有软件内容采用 [Apache-2.0](../LICENSE)，原创项目文档采用 [CC-BY-SA-4.0](../LICENSE-docs)，具体范围见 [README](../README.md#许可证)。
+
+上述许可不替代第三方依赖自身的许可。使用或分发 DiskANN、其依赖及本地补丁涉及的上游代码时，保留相应原始版权和许可声明；补丁的修改范围见下文。赛题任务书原文、文档中的外部引用和外部数据集也不因收录进本项目而被重新授权。
+
+## 依赖记录
+
 | 依赖 | 固定版本或提交 | 本地许可证来源 |
 | --- | --- | --- |
 | DiskANN | 0.6.1 / `4c31367b6c3df5395bf8b786299988a5d001ec5a` | MIT；`build/deps/DiskANN/LICENSE` |
