@@ -2,7 +2,7 @@
 
 设计基线 DESIGN-1.1，日期 2026 年 11 月 10 日。对应 REQ-1.0，团队两人，C++20 核心与 Python 离线评测。1.1 将目标平台确定为本机原生 Windows，接口修订为 API-1.1。
 
-当前有设计、声明式头文件、协议示例、Windows 环境/内存探针及 DiskANN 同步读取验证适配，尚无完整 Engine。阶段二已通过本机小规模工程可行性验收，依赖准确提交、读路径、容量粗算及计量证据见[验收记录](stage2-completion.md)。规模化性能、动态合并及官方内存口径仍待后续验证。平台边界见 [Windows 平台约定](windows-platform.md)。
+阶段二本机工程可行性和阶段三设计验收已通过。阶段四已交付同步存储和静态 C++ 并发基准，待接入真实静态 Engine 并完成独立召回与资源评测。依赖、读路径、容量估算和本机计量见[阶段二验收记录](stage2-completion.md)。平台边界见[Windows 平台约定](windows-platform.md)。
 
 2026 年 11 月 11 日补充第三阶段 A 交付 STORAGE-A-1/API-1.2/EVAL-1.1：只读块租约、批读取、在途去重边界、文件延迟回收、资源预约与模式切换、WAL 编解码及基准输出契约已给出。详见 [A 侧存储与基准契约](stage3-a-contract.md)及[交付记录](stage3-a-completion.md)。2026 年 11 月 16 日补充第三阶段 B 交付 INDEX-B-1：索引适配、稳定增量槽、快照内部类型、RequiredScratch、首次构建受限域、清单与版本目录契约，以及 Python 轨迹与召回校验，见 [B 侧契约](stage3-b-contract.md)及[交付记录](stage3-b-completion.md)。
 
@@ -163,7 +163,7 @@ Checkpoint 捕获目标 T，确保清单中持久化段已覆盖所有提交序�
 
 采用既定 40% 缓存、20% 增量、20% 元数据、15% 工作区、5% 余量作为初值，所有预算显式字节化，实例化前检查总和及最小工作集。禁用缓存时减少缓存分区额度，不暗中改变总内存限额。
 
-查询与重建模式的字节预算、单后台任务、缓存缩容失败、旧代次固定和回退路径按 [STORAGE-A-1](stage3-a-contract.md)执行；对应配置示例在 [resource-modes.json](../configs/examples/resource-modes.json)。rebuild_memory 未配置时禁止构建新段的维护；配置不代表大规模分配或第三方构建已验证。
+查询与重建模式按冻结的 STORAGE-A-1.1 执行，覆盖字节预算、单后台任务、缓存缩容失败、旧代次固定和回退路径。`rebuild_memory` 未配置时禁止构建新段的维护。大规模分配和真实构建仍待验证。[A 侧契约](stage3-a-contract.md) · [预算配置示例](../configs/examples/resource-modes.json)
 
 增量分区包括活跃、冻结和旧查询仍引用的内存段；工作区包含查询影子表、原向量精排、I/O 缓冲、写队列和后台构建。分配器及依赖占用必须计量；总进程峰值仍由外部受限环境验证，不能把内部计数当作完整 RSS。
 
