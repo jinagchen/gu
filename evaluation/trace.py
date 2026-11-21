@@ -97,14 +97,20 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# Artifacts are hashed as raw bytes, so they must not follow the platform
+# newline convention; a fixture generated on Windows has to hash the same as
+# one generated on Linux.
+def write_text(path, text):
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def dump(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n",
-                    encoding="utf-8")
+    write_text(path, json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def dump_rows(path, rows):
-    path.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
-                            for row in rows), encoding="utf-8")
+    write_text(path, "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+                             for row in rows))
 
 
 def build_timeline(rng, base_count, write_count, query_count):
@@ -116,6 +122,15 @@ def build_timeline(rng, base_count, write_count, query_count):
         pick = 1 + index + rng.below(total - index - 1)
         slots[index], slots[pick] = slots[pick], slots[index]
     query_slots = set(slots[:query_count])
+    target_snapshots = min(2, write_count, query_count)
+    prefixes = {slot - rank for rank, slot in enumerate(sorted(query_slots))}
+    if len(prefixes) < target_snapshots:
+        # Preserve the seeded layout whenever it already covers the target.
+        # Otherwise put queries after the first and last write.
+        query_slots.remove(min(query_slots))
+        query_slots.add(1)
+        query_slots.remove(max(query_slots))
+        query_slots.add(total - 1)
     if sum(1 for slot in range(total) if slot not in query_slots) == 0:
         raise SystemExit("trace generation failed: no write slot available")
 
@@ -148,7 +163,7 @@ def build_timeline(rng, base_count, write_count, query_count):
             "sequence": write_index,
         })
     distinct = {event["committed_prefix_at_arrival"] for event in events if event["kind"] == "query"}
-    if len(distinct) < 2:
+    if len(distinct) < target_snapshots:
         raise SystemExit("trace generation failed: queries do not observe distinct snapshots")
     return events
 
@@ -161,9 +176,14 @@ def exact_top_k(state, query, k):
 
 
 def build_fixture(output, seed, base_count, dimension, write_count, query_count, k):
+    counts = (base_count, dimension, write_count, query_count, k)
+    if any(type(value) is not int or value <= 0 for value in counts):
+        raise ValueError("all counts must be positive integers")
+    if k > base_count:
+        raise ValueError("k must not exceed the base vector count")
     rng = SplitMix64(seed)
     run_id = "stage3-b-exact"
-    output.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=False)
     inputs = output / "inputs"
 
     base_rows = [[f32(rng.unit() * 2.0 - 1.0) for _ in range(dimension)]
@@ -268,11 +288,9 @@ def build_fixture(output, seed, base_count, dimension, write_count, query_count,
             row["operation"] = event["operation"]
             row["id"] = str(event["id"])
             row["payload_row"] = str(event["payload_row"])
-            row["sequence"] = str(event["sequence"])
         else:
             row["query_id"] = str(event["query_id"])
             row["query_row"] = str(event["query_row"])
-            row["committed_prefix_at_arrival"] = str(event["committed_prefix_at_arrival"])
         trace_rows.append(row)
 
     write_f32(inputs / "base.f32", base_rows)
@@ -280,6 +298,8 @@ def build_fixture(output, seed, base_count, dimension, write_count, query_count,
     write_f32(inputs / "updates.f32", update_rows)
     write_f32(inputs / "queries.f32", query_vectors)
     write_u64(inputs / "query.ids.u64", list(range(len(query_vectors))))
+    for row in write_rows:
+        row["payload"]["sha256"] = digest(inputs / "updates.f32")
     dump_rows(output / "trace.jsonl", trace_rows)
     dump_rows(output / "writes.jsonl", write_rows)
     dump_rows(output / "queries.jsonl", query_rows)
@@ -408,7 +428,7 @@ def build_fixture(output, seed, base_count, dimension, write_count, query_count,
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path,
-                        help="run directory to create or overwrite")
+                        help="new run directory to create")
     parser.add_argument("--seed", type=int, default=20261116)
     parser.add_argument("--base", type=int, default=24, help="base vector count")
     parser.add_argument("--dimension", type=int, default=4)
@@ -420,6 +440,8 @@ def main(argv=None):
         parser.error("all counts must be positive")
     if args.k > args.base:
         parser.error("k must not exceed the base vector count")
+    if args.output.exists():
+        parser.error("output directory already exists")
     summary = build_fixture(args.output.resolve(), args.seed, args.base, args.dimension,
                             args.writes, args.queries, args.k)
     print(f"wrote {summary['run_id']}: {summary['writes']} writes, "

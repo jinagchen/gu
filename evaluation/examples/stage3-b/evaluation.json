@@ -3,6 +3,9 @@
   "protocol_version": "EVAL-1.1",
   "purpose": "contract_example",
   "run_id": "stage3-b-exact",
+  "run_incomplete": false,
+  "requires_review": false,
+  "resource_evidence": null,
   "queries": {
     "total": 6,
     "ok": 6,
@@ -102,6 +105,7 @@
     "neighbour_distances_recomputed": "pass",
     "write_sequence_prefix": "pass",
     "acknowledged_write_visibility": "pass",
+    "publication_real_time_order": "pass",
     "independent_answer_join": "pass"
   },
   "distance_check": {
