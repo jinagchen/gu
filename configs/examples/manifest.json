@@ -1,0 +1,43 @@
+{
+  "format_version": 1,
+  "instance_id": "7ed28bdd-5801-4c78-9ca4-643c7084321c",
+  "generation": "1",
+  "checkpoint_sequence": "0",
+  "dimension": 4,
+  "metric": "squared_l2",
+  "block_bytes": 4096,
+  "live_count": "24",
+  "adapter": {
+    "name": "diskann",
+    "commit": "4c31367b6c3df5395bf8b786299988a5d001ec5a",
+    "native_version": "0.6.1",
+    "parameters": "L32 R32 B4 M16"
+  },
+  "layout": {
+    "dimension": 4,
+    "max_degree": 32,
+    "row_bytes": 4096,
+    "vector_offset": 0,
+    "neighbor_offset": 16,
+    "metadata_offset": 148
+  },
+  "segments": [
+    {
+      "id": "1",
+      "uuid": "d7b82bc9-30b7-48ab-ae23-433de9edf3e4",
+      "generation": "1",
+      "kind": "base",
+      "covered_sequence": "0",
+      "node_count": "24",
+      "file_bytes": "98304",
+      "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "metadata": {
+        "path": "segments/d7b82bc9-30b7-48ab-ae23-433de9edf3e4/segment.json",
+        "logical_bytes": "1024",
+        "physical_bytes": "1024",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ],
+  "wal_replay_after": "0"
+}

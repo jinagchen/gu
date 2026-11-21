@@ -1,6 +1,6 @@
 #pragma once
 
-// Internal contract for the index side (INDEX-B-1). Public Engine API stays at
+// Internal contract for the index side (INDEX-B-1.2). Public Engine API stays at
 // API-1.2; these declarations are for A/B integration only and are not a
 // stable ABI. No implementation is supplied here.
 
@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -29,6 +30,10 @@ inline constexpr std::size_t kMaxDeltaPins = 4;
 inline constexpr std::size_t kMaxManifestSegments = 16;
 inline constexpr std::size_t kSha256Bytes = 32;
 inline constexpr std::size_t kInstanceIdBytes = 16;
+inline constexpr std::size_t kManifestPathBytes = 1024;
+inline constexpr std::size_t kManifestNameBytes = 128;
+inline constexpr std::size_t kManifestParameterBytes = 512;
+inline constexpr std::size_t kMaxManifestBytes = 65536;
 
 using Digest = std::array<std::byte, kSha256Bytes>;
 using InstanceId = std::array<std::byte, kInstanceIdBytes>;
@@ -63,6 +68,8 @@ struct SegmentDescriptor {
     std::uint64_t file_bytes = 0;
     std::uint32_t block_bytes = 0;
     NodeRecordLayout layout;
+    // False marks unsupported artifacts; every queryable segment needs its
+    // directory. A missing declared directory is corruption, never an empty ID set.
     bool has_version_directory = false;
     Digest content_sha256{};
 };
@@ -108,18 +115,18 @@ struct CandidateBudget {
     std::uint32_t total_limit = 128;
     std::uint32_t per_segment_limit = 64;
     std::uint32_t delta_row_limit = 12288;
+    // Available per-query reservation, supplied before computing the plan.
     std::uint64_t workspace_bytes = 0;
 };
 
+// Non-owning capture boundary. Segment IDs are never reused within an instance.
 struct DeltaPin {
     SegmentId segment = 0;
     // Slots below this prefix are immutable for the lifetime of the view.
     std::uint32_t committed_prefix = 0;
 };
 
-// Captured query view. Copyable, allocation-free, and sized by the same limits
-// the engine validates on Open, so capturing under publication_mutex cannot
-// fail on allocation.
+// Non-owning snapshot metadata. Consumers retain the accompanying ReadViewLease.
 struct ReadView {
     InstanceId instance_id{};
     Generation view_generation = 0;
@@ -130,6 +137,18 @@ struct ReadView {
     std::array<DeltaPin, kMaxDeltaPins> deltas{};
     std::uint32_t delta_count = 0;
     std::uint64_t live_count = 0;
+};
+
+// B's concrete token retains disk registrations, delta stores and their budget
+// charges. It is prepared before publication; copying a lease never allocates.
+class ReadViewLifetime {
+public:
+    virtual ~ReadViewLifetime() = default;
+};
+
+struct ReadViewLease {
+    ReadView view;
+    std::shared_ptr<const ReadViewLifetime> lifetime;
 };
 
 struct DeltaSlot {
@@ -156,12 +175,19 @@ public:
     virtual ~DeltaStore() = default;
 
     virtual Result<SlotId> ReserveSlot() = 0;
+    // Single coordinator only, before WAL append: undo the most recent
+    // unpublished reservation. Published slots can never be cancelled.
+    virtual Result<Success> CancelLastSlot(SlotId slot) = 0;
     virtual Result<Success> WriteSlot(SlotId slot, VectorId id,
+                                      Sequence sequence,
                                       std::span<const float> values) = 0;
+    // Called under publication_mutex after WAL sync; no allocation on success.
     virtual Result<Success> PublishPrefix(std::uint32_t new_prefix) = 0;
+    virtual DeltaPin CapturePin() const noexcept = 0;
     virtual Result<DeltaSegmentInfo> Freeze() = 0;
-    virtual Result<DeltaSlot> SlotRecord(SlotId slot) const = 0;
-    virtual Result<std::span<const float>> SlotValues(SlotId slot) const = 0;
+    virtual Result<DeltaSlot> SlotRecord(SlotId slot, const DeltaPin& pin) const = 0;
+    virtual Result<std::span<const float>> SlotValues(
+        SlotId slot, const DeltaPin& pin) const = 0;
 };
 
 enum class ExpansionState : std::uint8_t {
@@ -172,20 +198,33 @@ enum class ExpansionState : std::uint8_t {
 
 struct ExpansionRequest {
     std::span<const float> query;
-    const ReadView& view;
+    const ReadViewLease& view;
     CandidateBudget budget;
+    std::uint32_t k = 0;
     std::chrono::steady_clock::time_point deadline;
     std::uint32_t prefetch_blocks = 0;
 };
 
 struct ExpansionResult {
     std::vector<Candidate> candidates;
-    std::uint32_t blocks_read = 0;
-    std::uint64_t bytes_read = 0;
-    std::uint32_t prefetch_admitted = 0;
-    std::uint32_t prefetch_consumed = 0;
+    // Successful demand acquisitions, including cache hits and shared reads.
+    // Backend submissions and completed bytes belong to EngineStats only.
+    std::uint64_t logical_blocks_read = 0;
+    std::uint64_t logical_bytes_read = 0;
+    std::uint64_t prefetch_admitted = 0;
+    // Distinct keys admitted by this Expand and later acquired by its demands.
+    // This query-local diagnostic is not EngineStats::prefetch_consumed.
+    std::uint64_t prefetched_keys_used = 0;
     bool candidate_limit_reached = false;
     ExpansionState state = ExpansionState::exhausted;
+};
+
+struct RefinementRequest {
+    std::span<const Candidate> candidates;
+    std::span<const float> query;
+    const ReadViewLease& view;
+    CandidateBudget budget;
+    std::chrono::steady_clock::time_point deadline;
 };
 
 // Graph adapter. Every byte read from disk must pass through BlockReader;
@@ -197,12 +236,11 @@ public:
 
     virtual Result<IndexGeometry> Geometry() const = 0;
     virtual Result<NodeLocation> Locate(SegmentId segment,
-                                        NativeNodeId node) const = 0;
+        NativeNodeId node, const ReadViewLease& view) const = 0;
     virtual Result<ExpansionResult> Expand(const ExpansionRequest& request) = 0;
     // Exact re-ranking over original vectors; filters versions above the view.
     virtual Result<std::vector<Candidate>> Refine(
-        std::span<const Candidate> candidates, std::span<const float> query,
-        const ReadView& view) = 0;
+        const RefinementRequest& request) = 0;
 };
 
 struct VersionDirectoryEntry {
@@ -228,19 +266,32 @@ struct ScratchPlan {
     std::uint64_t candidate_array_bytes = 0;
     std::uint64_t refine_bytes = 0;
     std::uint64_t pq_scratch_bytes = 0;
+    std::uint64_t navigation_bytes = 0;
     std::uint64_t io_buffer_bytes = 0;
     std::uint64_t total_bytes = 0;
 };
 
-Result<ScratchPlan> ComputeScratchPlan(std::uint32_t dimension,
-                                       std::uint32_t candidate_limit,
-                                       std::uint32_t delta_slots,
-                                       std::uint32_t max_degree,
-                                       std::uint32_t prefetch_blocks,
-                                       std::uint32_t block_bytes);
+struct ScratchRequest {
+    std::uint32_t dimension = 0;
+    CandidateBudget budget;
+    std::uint32_t delta_slots = 0;
+    std::uint32_t segment_count = 0;
+    std::uint32_t max_degree = 0;
+    // Includes demand copies as well as speculative copies, independent of
+    // whether prefetch is enabled. BlockReader-owned buffers are separate.
+    std::uint32_t copy_buffer_blocks = 0;
+    std::uint32_t block_bytes = 0;
+    // nullopt means unknown/unsupported. Zero requires proof of no allocation.
+    std::optional<std::uint64_t> pq_scratch_bytes;
+    // Bound for visited sets, graph traversal and upstream temporary storage,
+    // derived from the opened index geometry, including its node counts.
+    std::optional<std::uint64_t> navigation_scratch_bytes;
+};
 
-// First-build input. The build runs in its own Job object with
-// memory_limit_bytes; staging_directory must be unique and ASCII-only.
+Result<ScratchPlan> ComputeScratchPlan(const ScratchRequest& request);
+
+// First-build input. Offline builds run in their own Job; online maintenance
+// children share the engine Job and also retain a workspace reservation.
 struct BuildRequest {
     std::filesystem::path vectors_path;
     std::filesystem::path ids_path;
@@ -277,32 +328,63 @@ struct BuildOutcome {
     bool published = false;
 };
 
+// UTF-8 bytes with explicit length, no terminator; unused bytes must be zero.
+// Fixed storage keeps the manifest copyable without allocating during publish.
+template <std::size_t Capacity>
+struct ManifestText {
+    std::uint32_t size = 0;
+    std::array<char, Capacity> bytes{};
+};
+
+struct ManifestAdapter {
+    ManifestText<kManifestNameBytes> name;
+    ManifestText<kManifestNameBytes> commit;
+    ManifestText<kManifestNameBytes> native_version;
+    ManifestText<kManifestParameterBytes> parameters;
+};
+
+struct ManifestFile {
+    ManifestText<kManifestPathBytes> path;
+    std::uint64_t logical_bytes = 0;
+    std::uint64_t physical_bytes = 0;
+    Digest sha256{};
+};
+
 struct ManifestEntry {
     SegmentId id = 0;
+    // Persistent UUID; the uint64 id is the instance-local index reference.
+    InstanceId uuid{};
     Generation generation = 0;
     SegmentKind kind = SegmentKind::base;
     Sequence covered_sequence = 0;
     std::uint64_t node_count = 0;
     std::uint64_t file_bytes = 0;
     Digest content_sha256{};
+    // segment.json describes native files, layout, checksums and versions.bin.
+    ManifestFile metadata;
 };
 
 // Bounded, copyable manifest. Publishing replaces CURRENT only after this
 // manifest and every referenced file are durable.
 struct Manifest {
+    std::uint32_t format_version = 1;
     InstanceId instance_id{};
     Generation generation = 0;
     Sequence checkpoint_sequence = 0;
     std::uint32_t dimension = 0;
     Metric metric = Metric::squared_l2;
     std::uint32_t block_bytes = 4096;
+    ManifestAdapter adapter;
     NodeRecordLayout layout;
     std::array<ManifestEntry, kMaxManifestSegments> segments{};
     std::uint32_t segment_count = 0;
     std::uint64_t live_count = 0;
+    Sequence wal_replay_after = 0;
 };
 
-// Declaration-only manifest codecs; callers supply already reserved storage.
+// FORMAT-1 UTF-8 JSON, bounded by kMaxManifestBytes, never a struct dump.
+// Bytes/Encode reject invalid input; Encode errors leave output untouched.
+// Decode checks the entire JSON; Open separately verifies CURRENT and files.
 Result<std::uint64_t> ManifestBytes(const Manifest& manifest);
 Result<std::uint64_t> EncodeManifest(const Manifest& manifest,
                                      std::span<std::byte> output);
