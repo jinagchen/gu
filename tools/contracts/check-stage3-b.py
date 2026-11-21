@@ -210,7 +210,7 @@ def validate_dynamic_config(value, config_path=None):
     partitions = ("total_bytes", "cache_bytes", "delta_bytes", "metadata_bytes",
                   "workspace_bytes", "reserve_bytes")
     shape(memory, partitions, " (memory)")
-    numbers = {key: u64_string(memory[key], key) for key in partitions}
+    numbers = {key: check.u64(memory[key], positive=key != "cache_bytes") for key in partitions}
     require(sum(numbers[key] for key in partitions[1:]) == numbers["total_bytes"],
             "Memory partitions do not sum to the total")
 
@@ -244,7 +244,7 @@ def validate_dynamic_config(value, config_path=None):
     wal = engine["wal"]
     shape(wal, ("rotation_bytes", "max_frame_bytes"), " (wal)")
     frame_cap = u64_string(wal["max_frame_bytes"], "max_frame_bytes")
-    frame = (64 + dimension * 4 + 64 + 7) // 8 * 8
+    frame = (64 + dimension * 4 + 4 + 7) // 8 * 8
     require(frame <= frame_cap, "WAL frame cannot fit the configured dimension")
     require(u64_string(wal["rotation_bytes"], "rotation_bytes") >= frame_cap + 64,
             "WAL rotation cannot fit the maximum frame")
@@ -287,6 +287,8 @@ def validate_dynamic_config(value, config_path=None):
             "Result queue byte cap below the record bound")
 
     require(type(value["notes"]) is list and value["notes"], "Dynamic config needs notes")
+    check.validate_engine(engine, dimension)
+    check.validate_run_settings(value)
 
     if config_path is not None:
         require(resolve(config_path, index["directory"], "index directory") ==
@@ -299,7 +301,7 @@ def validate_trace_contract(config, config_path):
     trace = config["trace"]
     path = resolve(config_path, trace["file"], "trace path")
     require(path.exists(), f"Missing trace file {path}")
-    rows = check.load_rows(path)
+    rows = check.trace_rows(path, config)
     require(rows, "Trace is empty")
     declared_operations = int(check.u64(trace["operations"]))
     declared_queries = int(check.u64(trace["queries"]))
@@ -312,27 +314,6 @@ def validate_trace_contract(config, config_path):
     require(len(writes) == declared_operations,
             "trace.operations counts writes, so it must equal the write rows")
     require(len(queries) == declared_queries, "trace.queries must equal the query rows")
-
-    for index, row in enumerate(rows):
-        require(row["arrival_index"] == index, "Trace arrival_index must be dense from zero")
-        require(row["schema_version"] == 1 and row["protocol_version"] == check.PROTOCOL,
-                "Trace row version mismatch")
-        require(row["purpose"] == config["purpose"], "Trace row purpose mismatch")
-        require(row["run_id"] == config["run_id"], "Trace row run_id mismatch")
-    require(len({row["operation_id"] for row in rows}) == len(rows),
-            "Duplicate operation_id in the trace")
-    require([int(row["sequence"]) for row in writes] == list(range(1, len(writes) + 1)),
-            "Trace write sequence must be contiguous from 1")
-    require(all(row["operation"] in ("insert", "upsert") for row in writes),
-            "Unregistered write operation in the trace")
-
-    committed = 0
-    for row in rows:
-        if row["kind"] == "write":
-            committed += 1
-        else:
-            require(int(row["committed_prefix_at_arrival"]) == committed,
-                    "committed_prefix_at_arrival disagrees with the write prefix")
 
     total = len(rows)
     mix = {
