@@ -240,6 +240,9 @@ EngineStats Difference(const EngineStats& before, const EngineStats& after) {
     AGENT_IO_DELTA(io_read_errors);
     AGENT_IO_DELTA(prefetch_submitted);
     AGENT_IO_DELTA(prefetch_consumed);
+    AGENT_IO_DELTA(prefetch_ready_at_demand);
+    AGENT_IO_DELTA(cache_hits);
+    AGENT_IO_DELTA(cache_misses);
     AGENT_IO_DELTA(wal_bytes_written);
     AGENT_IO_DELTA(checkpoint_bytes_written);
     AGENT_IO_DELTA(merge_bytes_written);

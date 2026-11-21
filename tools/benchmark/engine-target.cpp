@@ -145,10 +145,8 @@ Result<BenchmarkSearchResult> EngineBenchmarkTarget::Search(std::uint64_t row,
 
 Result<EngineStats> EngineBenchmarkTarget::Stats() const { return engine_->Stats(); }
 
-Result<Success> EngineBenchmarkTarget::Drain(std::chrono::steady_clock::time_point) {
-    // The synchronous backend completes every read before returning, so there
-    // is no outstanding I/O to quiesce; admission stays open for later phases.
-    return Success{};
+Result<Success> EngineBenchmarkTarget::Drain(std::chrono::steady_clock::time_point deadline) {
+    return engine_->QuiesceReads(deadline);
 }
 
 }  // namespace agent_io::bench_cli

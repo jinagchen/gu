@@ -167,8 +167,9 @@ struct FrontierEntry {
 class GraphAdapter final : public IndexAdapter, public VectorAccess {
 public:
     GraphAdapter(IndexGeometry geometry, std::vector<SegmentState> segments,
-                 std::shared_ptr<BlockReader> reader)
-        : geometry_(geometry), segments_(std::move(segments)), reader_(std::move(reader)) {}
+                 std::shared_ptr<BlockReader> reader, std::uint32_t max_batch_blocks)
+        : geometry_(geometry), segments_(std::move(segments)), reader_(std::move(reader)),
+          max_batch_blocks_(max_batch_blocks) {}
 
     Result<IndexGeometry> Geometry() const override { return geometry_; }
 
@@ -368,17 +369,19 @@ private:
                          block_bytes};
             locations.push_back(BlockLocation{key, state.graph});
         }
-        auto leases = reader_->ReadBatch(std::span<const BlockLocation>(locations),
-                                         BlockReadOptions{ReadPriority::demand, deadline});
-        if (const auto* error = std::get_if<Error>(&leases)) return *error;
-        const auto blocks_read = std::get<std::vector<BlockLeasePtr>>(std::move(leases));
-        if (blocks_read.size() != blocks) return Corrupt("Short batch from the block reader");
         std::vector<std::byte> row(layout.row_bytes);
-        for (std::uint32_t index = 0; index < blocks; ++index) {
-            const auto bytes = blocks_read[index]->Bytes();
-            if (bytes.size() < block_bytes) return Corrupt("Block lease is smaller than a block");
-            std::memcpy(row.data() + static_cast<std::size_t>(index) * block_bytes,
-                        bytes.data(), block_bytes);
+        for (std::size_t begin = 0; begin < blocks; begin += max_batch_blocks_) {
+            const auto count = (std::min)(static_cast<std::size_t>(max_batch_blocks_), blocks - begin);
+            auto leases = reader_->ReadBatch(std::span<const BlockLocation>(locations).subspan(begin, count),
+                                             BlockReadOptions{ReadPriority::demand, deadline});
+            if (const auto* error = std::get_if<Error>(&leases)) return *error;
+            const auto& batch = std::get<std::vector<BlockLeasePtr>>(leases);
+            if (batch.size() != count) return Corrupt("Short batch from the block reader");
+            for (std::size_t index = 0; index < count; ++index) {
+                const auto bytes = batch[index]->Bytes();
+                if (bytes.size() < block_bytes) return Corrupt("Block lease is smaller than a block");
+                std::memcpy(row.data() + (begin + index) * block_bytes, bytes.data(), block_bytes);
+            }
         }
         return DecodeNodeRow(std::span<const std::byte>(row), layout, geometry_.dimension,
                              scratch);
@@ -430,41 +433,68 @@ private:
             seed_locations.push_back(BlockLocation{
                 BlockKey{state.graph->Id(), offset, state.descriptor.block_bytes}, state.graph});
         }
-        auto seed_leases = reader_->ReadBatch(std::span<const BlockLocation>(seed_locations),
-                                              BlockReadOptions{ReadPriority::demand,
-                                                               request.deadline});
-        if (const auto* error = std::get_if<Error>(&seed_leases)) return *error;
-        const auto seed_blocks = std::get<std::vector<BlockLeasePtr>>(std::move(seed_leases));
-        if (seed_blocks.size() != seeds.size()) return Corrupt("Short seed batch from the reader");
-        counters.logical_blocks_read += seed_blocks.size();
-        for (std::size_t index = 0; index < seed_blocks.size(); ++index) {
-            const auto bytes = seed_blocks[index]->Bytes();
+        const auto score = [&](const BlockLease& block, NativeNodeId node) -> Result<Success> {
+            const auto bytes = block.Bytes();
             if (bytes.size() < layout.row_bytes)
-                return Corrupt("Entry seed block is smaller than a row");
-            std::vector<std::byte> row_bytes(layout.row_bytes);
-            std::memcpy(row_bytes.data(), bytes.data(), layout.row_bytes);
-            std::vector<float> values;
-            const auto decoded = DecodeNodeRow(std::span<const std::byte>(row_bytes), layout,
-                                               geometry_.dimension, values);
+                return Corrupt("Graph block is smaller than a row");
+            const auto decoded = DecodeNodeRow(bytes.first(layout.row_bytes), layout,
+                                               geometry_.dimension, scratch);
             if (const auto* error = std::get_if<Error>(&decoded)) return *error;
-            const auto& seed_row = std::get<NodeRow>(decoded);
-            const double distance = SquaredL2(query, values.data(), geometry_.dimension);
-            visited.emplace(seeds[index], static_cast<float>(distance));
-            frontier.push(FrontierEntry{distance, seeds[index]});
+            const auto& row = std::get<NodeRow>(decoded);
+            const double distance = SquaredL2(query, scratch.data(), geometry_.dimension);
+            const Scored candidate{distance, row.id, row.version, node};
+            visited.emplace(node, static_cast<float>(distance));
+            frontier.push(FrontierEntry{distance, node});
             if (results.size() < working) {
-                results.push_back(Scored{distance, seed_row.id, seed_row.version, seeds[index]});
+                results.push_back(candidate);
             } else {
                 auto worst_iterator = std::max_element(results.begin(), results.end(),
                     [](const Scored& left, const Scored& right) {
                         return left.distance < right.distance;
                     });
-                if (distance < worst_iterator->distance)
-                    *worst_iterator = Scored{distance, seed_row.id, seed_row.version,
-                                             seeds[index]};
+                if (distance < worst_iterator->distance) *worst_iterator = candidate;
             }
-        }
-        counters.logical_bytes_read += static_cast<std::uint64_t>(seed_blocks.size()) *
-            layout.row_bytes;
+            return Success{};
+        };
+
+        const auto read_and_score = [&](std::span<const BlockLocation> locations,
+                                        std::span<const NativeNodeId> nodes,
+                                        bool lookahead) -> Result<Success> {
+            const auto width = (std::min)(std::size_t{8}, static_cast<std::size_t>(max_batch_blocks_));
+            std::size_t admitted_for_batch = 0;
+            for (std::size_t begin = 0; begin < locations.size(); begin += width) {
+                const auto count = (std::min)(width, locations.size() - begin);
+                auto leases = reader_->ReadBatch(locations.subspan(begin, count),
+                    BlockReadOptions{ReadPriority::demand, request.deadline});
+                if (const auto* error = std::get_if<Error>(&leases)) return *error;
+                const auto& blocks = std::get<std::vector<BlockLeasePtr>>(leases);
+                if (blocks.size() != count) return Corrupt("Short graph batch from the reader");
+                counters.prefetched_keys_used += admitted_for_batch;
+                admitted_for_batch = 0;
+                // Start I/O for the next adjacent-neighbour batch before scoring this one.
+                const auto next = begin + count;
+                const auto window = (std::min)({width, locations.size() - next,
+                    static_cast<std::size_t>(request.prefetch_blocks)});
+                if (lookahead) {
+                    for (const auto& location : locations.subspan(next, window)) {
+                        auto hint = reader_->TryPrefetch(location, request.deadline);
+                        const auto* disposition = std::get_if<PrefetchDisposition>(&hint);
+                        if (disposition && *disposition == PrefetchDisposition::admitted)
+                            ++admitted_for_batch;
+                    }
+                    counters.prefetch_admitted += admitted_for_batch;
+                }
+                counters.logical_blocks_read += blocks.size();
+                for (std::size_t index = 0; index < count; ++index) {
+                    counters.logical_bytes_read += blocks[index]->Key().byte_count;
+                    auto scored = score(*blocks[index], nodes[begin + index]);
+                    if (const auto* error = std::get_if<Error>(&scored)) return *error;
+                }
+            }
+            return Success{};
+        };
+        auto seeded = read_and_score(seed_locations, seeds, false);
+        if (const auto* error = std::get_if<Error>(&seeded)) return *error;
 
         while (!frontier.empty()) {
             if (std::chrono::steady_clock::now() > request.deadline) {
@@ -485,6 +515,8 @@ private:
             frontier.pop();
             auto row = ReadNode(state, current.node, request.deadline, scratch);
             if (const auto* error = std::get_if<Error>(&row)) return *error;
+            counters.logical_blocks_read += layout.row_bytes / state.descriptor.block_bytes;
+            counters.logical_bytes_read += layout.row_bytes;
             const auto& node_row = std::get<NodeRow>(row);
             const auto neighbours = node_row.neighbors;
             if (neighbours.empty()) continue;
@@ -508,41 +540,8 @@ private:
                     state.graph});
             }
             if (pending.empty()) continue;
-            auto leases = reader_->ReadBatch(std::span<const BlockLocation>(locations),
-                                             BlockReadOptions{ReadPriority::demand,
-                                                              request.deadline});
-            if (const auto* error = std::get_if<Error>(&leases)) return *error;
-            const auto blocks = std::get<std::vector<BlockLeasePtr>>(std::move(leases));
-            counters.logical_blocks_read += blocks.size();
-            for (const auto& block : blocks)
-                counters.logical_bytes_read += block->Key().byte_count;
-            for (std::size_t index = 0; index < blocks.size(); ++index) {
-                std::vector<float> values;
-                std::vector<std::byte> row_bytes(layout.row_bytes);
-                const auto bytes = blocks[index]->Bytes();
-                if (bytes.size() < layout.row_bytes)
-                    return Corrupt("Neighbour block is smaller than a row");
-                std::memcpy(row_bytes.data(), bytes.data(), layout.row_bytes);
-                const auto decoded = DecodeNodeRow(std::span<const std::byte>(row_bytes), layout,
-                                                   geometry_.dimension, values);
-                if (const auto* error = std::get_if<Error>(&decoded)) return *error;
-                const auto& neighbour_row = std::get<NodeRow>(decoded);
-                const double distance = SquaredL2(query, values.data(), geometry_.dimension);
-                visited.emplace(pending[index], static_cast<float>(distance));
-                frontier.push(FrontierEntry{distance, pending[index]});
-                if (results.size() < working) {
-                    results.push_back(Scored{distance, neighbour_row.id, neighbour_row.version,
-                                             pending[index]});
-                } else {
-                    auto worst_iterator = std::max_element(results.begin(), results.end(),
-                        [](const Scored& left, const Scored& right) {
-                            return left.distance < right.distance;
-                        });
-                    if (distance < worst_iterator->distance)
-                        *worst_iterator = Scored{distance, neighbour_row.id,
-                                                 neighbour_row.version, pending[index]};
-                }
-            }
+            auto scored = read_and_score(locations, pending, request.prefetch_blocks > 0);
+            if (const auto* error = std::get_if<Error>(&scored)) return *error;
         }
         std::sort(results.begin(), results.end(), [](const Scored& left, const Scored& right) {
             if (left.distance != right.distance) return left.distance < right.distance;
@@ -554,6 +553,7 @@ private:
     IndexGeometry geometry_;
     std::vector<SegmentState> segments_;
     std::shared_ptr<BlockReader> reader_;
+    const std::uint32_t max_batch_blocks_;
 };
 
 }  // namespace
@@ -561,8 +561,10 @@ private:
 Result<OpenedIndex> OpenIndexDirectory(const std::filesystem::path& directory,
                                        std::shared_ptr<BlockReader> reader,
                                        std::shared_ptr<FileRegistry> registry,
-                                       std::uint32_t block_bytes) {
-    if (!reader || !registry) return Invalid("Open needs a block reader and a file registry");
+                                       std::uint32_t block_bytes,
+                                       std::uint32_t max_batch_blocks) {
+    if (!reader || !registry || !max_batch_blocks)
+        return Invalid("Open needs a block reader, file registry and nonzero batch capacity");
     auto current_text = ReadSmallFile(directory / "CURRENT", kMaxCurrentBytes);
     if (const auto* error = std::get_if<Error>(&current_text)) return *error;
     const auto current = DecodeCurrent(std::get<std::string>(current_text));
@@ -684,7 +686,8 @@ Result<OpenedIndex> OpenIndexDirectory(const std::filesystem::path& directory,
         for (const auto& file : state.metadata.files)
             metadata_bytes += file.path.size() + sizeof(SegmentFileRecord);
     }
-    auto adapter = std::make_unique<GraphAdapter>(geometry, std::move(segments), reader);
+    auto adapter = std::make_unique<GraphAdapter>(geometry, std::move(segments), reader,
+                                                   max_batch_blocks);
     OpenedIndex opened;
     opened.registered_metadata_bytes = directory_bytes;
     opened.unbudgeted_metadata_bytes = metadata_bytes;

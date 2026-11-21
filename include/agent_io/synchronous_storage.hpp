@@ -8,16 +8,19 @@ namespace agent_io {
 Result<std::shared_ptr<ResourceGovernor>> CreateResourceGovernor(
     const MemoryBudget& query,
     const std::optional<MemoryBudget>& rebuild = std::nullopt);
+std::uint64_t MemoryAccountedBytes(const ResourceGovernor& governor);
 
 struct SynchronousStorageOptions {
     bool direct_reads = true;
     std::uint32_t max_registered_files = 64;
     std::uint32_t max_inflight_reads = 64;
+    bool overlapped = false;
 };
 
 Result<std::unique_ptr<FileRegistry>> CreateSynchronousFileRegistry(
     std::shared_ptr<ResourceGovernor> governor,
-    const SynchronousStorageOptions& options = {});
+    const SynchronousStorageOptions& options = {},
+    std::function<void(FileId)> on_retire = {});
 
 // The buffer owns its reservation until after the allocation has been freed.
 Result<std::shared_ptr<BufferLease>> AllocateReadBuffer(
@@ -26,6 +29,7 @@ Result<std::shared_ptr<BufferLease>> AllocateReadBuffer(
 
 // Required address, offset and length alignment for a file from this registry.
 Result<std::uint32_t> ReadAlignment(const FileLease& file);
+bool ReadFileRetired(const FileLease& file) noexcept;
 
 struct ReadBackendStats {
     std::uint64_t io_reads_submitted = 0;
@@ -34,11 +38,13 @@ struct ReadBackendStats {
     std::uint32_t inflight_reads = 0;
 };
 
-// Successful Submit completes its callback before returning.
-class SynchronousReadBackend : public ReadBackend {
+class MeteredReadBackend : public ReadBackend {
 public:
     virtual ReadBackendStats Stats() const = 0;
 };
+
+// Successful Submit completes its callback before returning.
+class SynchronousReadBackend : public MeteredReadBackend {};
 
 Result<std::unique_ptr<SynchronousReadBackend>> CreateSynchronousReadBackend(
     std::shared_ptr<ResourceGovernor> governor,

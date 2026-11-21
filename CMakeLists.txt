@@ -32,7 +32,8 @@ add_executable(vector_build tools/build/main.cpp)
 target_link_libraries(vector_build PRIVATE agent_io_index)
 
 add_library(agent_io_storage STATIC
-    src/storage/synchronous_storage.cpp src/storage/synchronous_block_reader.cpp)
+    src/storage/synchronous_storage.cpp src/storage/synchronous_block_reader.cpp
+    src/storage/optimized_block_reader.cpp)
 target_include_directories(agent_io_storage PUBLIC include)
 target_compile_features(agent_io_storage PUBLIC cxx_std_20)
 target_compile_definitions(agent_io_storage PRIVATE

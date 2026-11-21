@@ -1,12 +1,15 @@
-#include "agent_io/synchronous_storage.hpp"
+#include "agent_io/optimized_storage.hpp"
 
 #include <windows.h>
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
 #include <future>
+#include <list>
+#include <mutex>
 #include <source_location>
 #include <stdexcept>
 #include <thread>
@@ -382,6 +385,268 @@ void CheckBlocks(Fixture& fixture) {
     std::puts("PASS: shared in-flight read, waiter timeout, leader completion");
     std::puts("PASS: short completion never publishes a partial block");
 }
+
+void CheckClock(Fixture& fixture) {
+    auto budget = Budget();
+    budget.reserve_bytes += budget.cache_bytes - 7600;
+    budget.cache_bytes = 7600;
+    auto governor = Take(CreateResourceGovernor(budget));
+    SynchronousStorageOptions options{false, 4, 4};
+    std::shared_ptr<MeteredReadBackend> backend =
+        Take(CreateSynchronousReadBackend(governor, options));
+    auto reader = Take(CreateOptimizedBlockReader(governor, backend, {4, 0, true}));
+    auto registry = Take(CreateSynchronousFileRegistry(governor, options,
+        [&](FileId file) { reader->Retire(file); }));
+    auto file = Take(registry->Open(fixture.path));
+    const auto read = [&](std::uint64_t offset) {
+        const BlockLocation at{{file->Id(), offset, 4096}, file};
+        return Take(reader->ReadBatch(std::span(&at, 1),
+            {ReadPriority::demand, std::chrono::steady_clock::now() + 2s})).front();
+    };
+    auto pinned = read(0);
+    Require(read(0)->Bytes()[0] == fixture.expected[0], "Cached content differs");
+    Require(backend->Stats().io_reads_submitted == 1, "Hit sent a kernel read");
+    auto fallback = read(4096);
+    Require(reader->Stats().cache_resident_bytes == 4096, "Pinned block exceeded cache capacity");
+    Require(fallback->Bytes()[0] == fixture.expected[4096], "Workspace fallback content differs");
+    pinned.reset();
+    auto replacement = read(4096);
+    Require(backend->Stats().io_reads_submitted == 3, "Workspace fallback was cached");
+    read(4096);
+    Require(backend->Stats().io_reads_submitted == 3, "CLOCK failed to replace the released block");
+    Take(registry->Retire(file->Id()));
+    Require(reader->Stats().cache_resident_bytes == 0, "Retire kept a strong cache reference");
+    read(4096);
+    Require(reader->Stats().cache_resident_bytes == 0, "Retired file returned to cache");
+    Take(reader->Drain());
+    Require(replacement->Bytes()[0] == fixture.expected[4096], "Retire invalidated a held lease");
+    std::puts("PASS: CLOCK budget, pinned fallback, eviction, retirement");
+}
+
+class ParkedBackend final : public MeteredReadBackend {
+    struct Request {
+        ReadRequest request;
+        ReadCallback callback;
+    };
+    mutable std::mutex mutex_;
+    std::condition_variable queued_;
+    std::list<Request> requests_;
+    ReadBackendStats stats_;
+public:
+    Result<Success> Submit(ReadRequest request, ReadCallback callback) override {
+        std::lock_guard lock(mutex_);
+        requests_.push_back(Request{std::move(request), std::move(callback)});
+        ++stats_.io_reads_submitted;
+        queued_.notify_all();
+        return Success{};
+    }
+    bool WaitForDemand(std::size_t count) {
+        std::unique_lock lock(mutex_);
+        return queued_.wait_for(lock, 1s, [&] {
+            return static_cast<std::size_t>(std::ranges::count_if(requests_, [](const auto& request) {
+                return request.request.priority == ReadPriority::demand;
+            })) >= count;
+        });
+    }
+    void Finish(bool short_read, std::optional<ReadPriority> priority = std::nullopt) {
+        std::optional<Request> request;
+        {
+            std::unique_lock lock(mutex_);
+            auto found = requests_.end();
+            Require(queued_.wait_for(lock, 2s, [&] {
+                found = std::ranges::find_if(requests_, [&](const auto& entry) {
+                    return !priority || entry.request.priority == *priority;
+                });
+                return found != requests_.end();
+            }), "No queued read for test completion");
+            request.emplace(std::move(*found));
+            requests_.erase(found);
+        }
+        std::ranges::fill(request->request.buffer->WritableBytes(), std::byte{0x66});
+        request->callback(ReadCompletion{request->request.request_id,
+            request->request.block.byte_count - (short_read ? 1u : 0u)});
+    }
+    Result<Success> Drain() override { return Success{}; }
+    ReadBackendStats Stats() const override {
+        std::lock_guard lock(mutex_);
+        return stats_;
+    }
+};
+
+void CheckPrefetch(Fixture& fixture) {
+    auto governor = Take(CreateResourceGovernor(Budget()));
+    auto registry = Take(CreateSynchronousFileRegistry(governor, {false, 4, 4}));
+    auto file = Take(registry->Open(fixture.path));
+    auto backend = std::make_shared<ParkedBackend>();
+    auto reader = Take(CreateOptimizedBlockReader(governor, backend, {4, 1, true}));
+    const BlockLocation first{{file->Id(), 0, 4096}, file};
+    const BlockLocation second{{file->Id(), 4096, 4096}, file};
+    const auto deadline = [] { return std::chrono::steady_clock::now() + 2s; };
+    auto initiator = std::make_shared<QueryReadState>();
+    initiator->prefetch_limit = 1;
+    {
+        QueryReadScope scope(initiator);
+        Require(Take(reader->TryPrefetch(first, deadline())) == PrefetchDisposition::admitted,
+            "Prefetch not admitted");
+        Require(Take(reader->TryPrefetch(first, deadline())) == PrefetchDisposition::already_present,
+            "In-flight prefetch was not shared");
+        Require(Take(reader->TryPrefetch(second, deadline())) == PrefetchDisposition::dropped,
+            "Prefetch exceeded cap");
+    }
+    std::weak_ptr<QueryReadState> initiator_pin = initiator;
+    initiator.reset();
+    auto waiter = std::make_shared<QueryReadState>();
+    std::weak_ptr<QueryReadState> waiter_pin = waiter;
+    {
+        QueryReadScope scope(std::move(waiter));
+        Expect(reader->ReadBatch(std::span(&first, 1), {ReadPriority::demand,
+            std::chrono::steady_clock::now() + 20ms}), ErrorCode::deadline_exceeded);
+    }
+    Require(!initiator_pin.expired() && !waiter_pin.expired(), "Timeout released query slot early");
+    Require(backend->Stats().io_reads_submitted == 1, "Waiter submitted duplicate IO");
+    Expect(reader->Quiesce(std::chrono::steady_clock::now()), ErrorCode::deadline_exceeded);
+    backend->Finish(true);
+    Require(initiator_pin.expired() && waiter_pin.expired(), "Completion leaked a query slot");
+    Require(reader->Stats().cache_resident_bytes == 0, "Short prefetch was published");
+    auto retry = std::async(std::launch::async, [&] {
+        return reader->ReadBatch(std::span(&first, 1), {ReadPriority::demand, deadline()});
+    });
+    backend->Finish(true);
+    Expect(retry.get(), ErrorCode::io_error);
+    Require(Take(reader->TryPrefetch(first, deadline())) == PrefetchDisposition::admitted,
+        "Prefetch could not retry after a short completion");
+    backend->Finish(false);
+    const auto use = Take(reader->ReadBatch(std::span(&first, 1),
+        {ReadPriority::demand, deadline()}));
+    Require(use.front()->Bytes()[0] == std::byte{0x66}, "Successful prefetch bytes differ");
+    const auto stats = reader->Stats();
+    Require(stats.prefetch_submitted == 2 && stats.prefetch_consumed == 1 &&
+        stats.prefetch_ready_at_demand == 1 && stats.peak_prefetch_reads == 1,
+        "Prefetch statistics exceed actual admissions or use");
+    Take(reader->Drain());
+    std::puts("PASS: prefetch quota, sharing, timeout ownership, short completion and retry");
+}
+
+class DeadlineBackend final : public SynchronousReadBackend {
+public:
+    std::chrono::steady_clock::time_point first_deadline;
+    std::uint64_t submissions = 0;
+
+    Result<Success> Submit(ReadRequest request, ReadCallback callback) override {
+        if (++submissions == 1) std::this_thread::sleep_until(first_deadline + 10ms);
+        std::ranges::fill(request.buffer->WritableBytes(), std::byte{0x66});
+        callback(ReadCompletion{request.request_id, request.block.byte_count});
+        return Success{};
+    }
+    Result<Success> Drain() override { return Success{}; }
+    ReadBackendStats Stats() const override { return {}; }
+};
+
+void CheckBatchDispatch(Fixture& fixture) {
+    using Clock = std::chrono::steady_clock;
+    auto governor = Take(CreateResourceGovernor(Budget()));
+    auto registry = Take(CreateSynchronousFileRegistry(governor, {false, 4, 3}));
+    auto file = Take(registry->Open(fixture.path));
+    const std::array demand{
+        BlockLocation{{file->Id(), 4096, 4096}, file},
+        BlockLocation{{file->Id(), 8192, 4096}, file},
+        BlockLocation{{file->Id(), 12288, 4096}, file}};
+    auto slow = std::make_shared<DeadlineBackend>();
+    auto reader = Take(CreateOptimizedBlockReader(governor, slow, {3, 0, false}));
+    slow->first_deadline = Clock::now() + 100ms;
+    Expect(reader->ReadBatch(demand, {ReadPriority::demand, slow->first_deadline}),
+        ErrorCode::deadline_exceeded);
+    Require(slow->submissions == 1, "Submitted a new read after the batch deadline");
+    Take(reader->Quiesce(Clock::now() + 1s));
+    Take(reader->ReadBatch(demand, {ReadPriority::demand, Clock::now() + 1s}));
+    Require(slow->submissions == 4, "Timed-out queue blocked a retry");
+    Take(reader->Drain());
+
+    auto parked = std::make_shared<ParkedBackend>();
+    reader = Take(CreateOptimizedBlockReader(governor, parked, {3, 1, true}));
+    const BlockLocation speculative{{file->Id(), 0, 4096}, file};
+    Require(Take(reader->TryPrefetch(speculative, Clock::now() + 1s)) ==
+        PrefetchDisposition::admitted, "Prefetch was not held in a slot");
+    auto batch = std::async(std::launch::async, [&] {
+        return reader->ReadBatch(demand, {ReadPriority::demand, Clock::now() + 3s});
+    });
+    Require(parked->WaitForDemand(2), "Demand did not use its two free slots");
+    Require(parked->Stats().io_reads_submitted == 3, "Dispatched more than three reads");
+
+    auto later = std::make_shared<QueryReadState>();
+    std::weak_ptr<QueryReadState> queued_pin = later;
+    {
+        QueryReadScope scope(std::move(later));
+        Expect(reader->ReadBatch(std::span(demand).last(1),
+            {ReadPriority::demand, Clock::now() + 30ms}), ErrorCode::deadline_exceeded);
+    }
+    Require(queued_pin.expired(), "A queued read retained a timed-out waiter");
+    parked->Finish(false, ReadPriority::demand);
+    Require(parked->WaitForDemand(2), "Queued demand did not refill the freed slot");
+    parked->Finish(false, ReadPriority::demand);
+    parked->Finish(false, ReadPriority::demand);
+    const auto blocks = Take(batch.get());
+    for (std::size_t i = 0; i < demand.size(); ++i)
+        Require(blocks[i]->Key() == demand[i].key, "Batched reads returned out of order");
+    Require(parked->Stats().io_reads_submitted == 4, "Queued same-key read was dispatched twice");
+    const auto stats = reader->Stats();
+    Require(stats.peak_inflight_reads == 3 && stats.peak_prefetch_reads == 1 &&
+        stats.cache_resident_bytes == 3 * 4096, "Incorrect slots or speculative completion");
+    parked->Finish(false, ReadPriority::prefetch);
+    Take(reader->Drain());
+    std::puts("PASS: deadline stops new reads, queued sharing and demand use of free slots");
+}
+
+void CheckIocp(Fixture& fixture) {
+    auto governor = Take(CreateResourceGovernor(Budget()));
+    auto registry = Take(CreateSynchronousFileRegistry(governor, {true, 4, 2, true}));
+    auto file = Take(registry->Open(fixture.path));
+    auto backend = Take(CreateIocpReadBackend(governor, 2));
+    auto first = Take(AllocateReadBuffer(governor, 4096, Take(ReadAlignment(*file))));
+    auto second = Take(AllocateReadBuffer(governor, 4096, Take(ReadAlignment(*file))));
+    std::promise<Result<ReadCompletion>> done_first, done_second;
+    std::promise<void> entered, release;
+    auto resume = release.get_future();
+    Take(backend->Submit(Request(1, file, first, 0, 4096),
+        [&](Result<ReadCompletion> result) {
+            entered.set_value();
+            resume.wait();
+            done_first.set_value(std::move(result));
+        }));
+    entered.get_future().wait();
+    const auto overlap = backend->Submit(Request(3, file, first, 4096, 4096),
+        [](Result<ReadCompletion>) {});
+    const auto submitted = backend->Submit(Request(2, file, second, 4096, 4096),
+        [&](Result<ReadCompletion> result) { done_second.set_value(std::move(result)); });
+    auto draining = std::async(std::launch::async, [&] { return backend->Drain(); });
+    const bool waited = draining.wait_for(20ms) == std::future_status::timeout;
+    release.set_value();
+    Take(draining.get());
+    Expect(overlap, ErrorCode::invalid_argument);
+    Take(submitted);
+    Require(waited, "Drain returned while IOCP callback held leases");
+    Require(Take(done_first.get_future().get()).request_id == 1 &&
+        Take(done_second.get_future().get()).request_id == 2, "IOCP completion IDs differ");
+    Require(std::equal(first->Bytes().begin(), first->Bytes().end(), fixture.expected.begin()) &&
+        std::equal(second->Bytes().begin(), second->Bytes().end(), fixture.expected.begin() + 4096),
+        "IOCP returned bad bytes");
+
+    // Use a fresh registry so the failure is submitted through its own port.
+    registry = Take(CreateSynchronousFileRegistry(governor, {true, 4, 2, true}));
+    file = Take(registry->Open(fixture.path));
+    backend = Take(CreateIocpReadBackend(governor, 2));
+    std::promise<Result<ReadCompletion>> failed;
+    auto read_only = std::make_shared<ReadOnlyBuffer>();
+    const auto invalid = backend->Submit(Request(1, file, read_only, 0, 4096),
+        [&](Result<ReadCompletion> result) { failed.set_value(std::move(result)); });
+    if (std::holds_alternative<Success>(invalid))
+        Expect(failed.get_future().get(), ErrorCode::io_error);
+    else
+        Expect(invalid, ErrorCode::io_error);
+    Take(backend->Drain());
+    Require(backend->Stats().io_read_errors == 1, "IOCP failed read was not counted once");
+    std::puts("PASS: native IOCP offsets, buffer exclusion, drain and read error");
+}
 }  // namespace
 
 int main() {
@@ -392,6 +657,10 @@ int main() {
         CheckReads(fixture, true);
         CheckDrain(fixture);
         CheckBlocks(fixture);
+        CheckClock(fixture);
+        CheckPrefetch(fixture);
+        CheckBatchDispatch(fixture);
+        CheckIocp(fixture);
         std::puts("PASS: synchronous storage baseline");
         return 0;
     } catch (const std::exception& error) {

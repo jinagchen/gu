@@ -428,6 +428,14 @@ boost::json::object Summary(const BenchmarkOptions& options, const BenchmarkRepo
         latencies[statuses[i]] = json::object{{"end_to_end", Latency(report.end_to_end[i])},
             {"queue", Latency(report.queue[i])}, {"service", Latency(report.service[i])}};
     output["latencies"] = std::move(latencies);
+    output["read_path"] = json::object{
+        {"cache_hits", std::to_string(report.counter_delta.cache_hits)},
+        {"cache_misses", std::to_string(report.counter_delta.cache_misses)},
+        {"prefetch_ready_at_demand", std::to_string(report.counter_delta.prefetch_ready_at_demand)},
+        {"cache_resident_bytes", std::to_string(report.end_stats.cache_resident_bytes)},
+        {"engine_accounted_bytes", std::to_string(report.end_stats.memory_accounted_bytes)},
+        {"peak_inflight_reads", report.end_stats.peak_inflight_reads},
+        {"peak_prefetch_reads", report.end_stats.peak_prefetch_reads}};
     constexpr const char* error_codes[] = {
         "invalid_argument", "not_found", "already_exists", "resource_exhausted",
         "deadline_exceeded", "search_incomplete", "io_error", "corruption",

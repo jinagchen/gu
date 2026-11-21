@@ -52,6 +52,6 @@ Result<OpenedIndex> OpenIndexDirectory(
     const std::filesystem::path& directory,
     std::shared_ptr<BlockReader> reader,
     std::shared_ptr<FileRegistry> registry,
-    std::uint32_t block_bytes);
+    std::uint32_t block_bytes, std::uint32_t max_batch_blocks = 64);
 
 }  // namespace agent_io

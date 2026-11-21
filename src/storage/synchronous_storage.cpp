@@ -1,4 +1,4 @@
-#include "agent_io/synchronous_storage.hpp"
+#include "agent_io/optimized_storage.hpp"
 
 #include <windows.h>
 #include <malloc.h>
@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <new>
+#include <thread>
 #include <utility>
 
 namespace agent_io {
@@ -118,6 +119,11 @@ public:
         std::lock_guard lock(state_->mutex);
         return state_->mode;
     }
+    std::uint64_t AccountedBytes() const {
+        std::lock_guard lock(state_->mutex);
+        const auto& used = state_->used;
+        return used[0] + used[1] + used[2] + used[3];
+    }
 };
 
 class Handle {
@@ -144,11 +150,14 @@ class NativeFile final : public FileLease {
     std::uint64_t size_;
 public:
     const std::uint32_t alignment;
+    const bool overlapped;
+    std::atomic_bool retired{false};
     mutable std::mutex io_mutex;
+    mutable HANDLE completion_port = nullptr;
     NativeFile(std::shared_ptr<const BudgetReservation> reservation, HANDLE handle,
-               FileId id, std::uint64_t size, std::uint32_t align)
+               FileId id, std::uint64_t size, std::uint32_t align, bool async)
         : reservation_(std::move(reservation)), handle_(handle),
-          id_(id), size_(size), alignment(align) {}
+          id_(id), size_(size), alignment(align), overlapped(async) {}
     HANDLE NativeHandle() const { return handle_.Get(); }
     FileId Id() const noexcept override { return id_; }
     std::uint64_t SizeBytes() const noexcept override { return size_; }
@@ -165,29 +174,36 @@ Result<FileId> NextFileId() {
 }
 
 struct FileEntry {
+    FileId id;
+    std::shared_ptr<const BudgetReservation> reservation;
     std::shared_ptr<NativeFile> file;
+    std::weak_ptr<NativeFile> retired_file;
     bool retired = false;
 };
 
 class Registry final : public FileRegistry {
     std::shared_ptr<ResourceGovernor> governor_;
     SynchronousStorageOptions options_;
+    std::function<void(FileId)> on_retire_;
     std::shared_ptr<const BudgetReservation> reservation_;
     std::mutex mutex_;
     std::map<FileIdentity, FileEntry> entries_;
 public:
     Registry(std::shared_ptr<ResourceGovernor> governor,
              SynchronousStorageOptions options,
+             std::function<void(FileId)> on_retire,
              std::shared_ptr<const BudgetReservation> reservation)
         : governor_(std::move(governor)), options_(options),
+          on_retire_(std::move(on_retire)),
           reservation_(std::move(reservation)) {}
     Result<std::shared_ptr<const FileLease>> Open(
         const std::filesystem::path& path) override {
         try {
             // No write/delete sharing: immutable data cannot change under a lease.
             Handle handle(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                nullptr, OPEN_EXISTING, options_.direct_reads
-                    ? FILE_FLAG_NO_BUFFERING : FILE_ATTRIBUTE_NORMAL, nullptr));
+                nullptr, OPEN_EXISTING,
+                (options_.direct_reads ? FILE_FLAG_NO_BUFFERING : FILE_ATTRIBUTE_NORMAL) |
+                    (options_.overlapped ? FILE_FLAG_OVERLAPPED : 0), nullptr));
             if (handle.Get() == INVALID_HANDLE_VALUE)
                 return SystemError("CreateFileW read", GetLastError());
             FILE_ID_INFO identity{};
@@ -225,31 +241,39 @@ public:
             if (const auto* error = std::get_if<Error>(&reserved)) return *error;
             auto id = NextFileId();
             if (const auto* error = std::get_if<Error>(&id)) return *error;
+            auto charge = std::get<std::shared_ptr<const BudgetReservation>>(std::move(reserved));
             auto file = std::make_shared<NativeFile>(
-                std::get<std::shared_ptr<const BudgetReservation>>(std::move(reserved)),
+                charge,
                 handle.Get(), std::get<FileId>(id),
-                static_cast<std::uint64_t>(size.QuadPart), alignment);
+                static_cast<std::uint64_t>(size.QuadPart), alignment, options_.overlapped);
             handle.Release();
-            entries_.emplace(key, FileEntry{file});
+            entries_.emplace(key, FileEntry{file->Id(), std::move(charge), file, {}, false});
             return std::shared_ptr<const FileLease>(std::move(file));
         } catch (const std::bad_alloc&) {
             return Exhausted();
         }
     }
     Result<Success> Retire(FileId id) override {
-        std::lock_guard lock(mutex_);
-        for (auto& [key, entry] : entries_) {
-            if (entry.file->Id() == id) {
-                entry.retired = true;
-                return Success{};
+        {
+            std::lock_guard lock(mutex_);
+            auto found = std::find_if(entries_.begin(), entries_.end(), [id](const auto& item) {
+                return item.second.id == id;
+            });
+            if (found == entries_.end()) return Error{ErrorCode::not_found, "Unknown file ID"};
+            if (!found->second.retired) {
+                found->second.retired = true;
+                found->second.file->retired = true;
+                found->second.retired_file = found->second.file;
+                found->second.file.reset();
             }
         }
-        return Error{ErrorCode::not_found, "Unknown file ID"};
+        if (on_retire_) on_retire_(id);
+        return Success{};
     }
     Result<Success> CollectRetired() override {
         std::lock_guard lock(mutex_);
         for (const auto& [key, entry] : entries_) {
-            if (entry.retired && entry.file.use_count() == 1)
+            if (entry.retired && entry.retired_file.expired())
                 return Error{ErrorCode::unsupported,
                     "Automatic deletion disabled pending recovery acceptance"};
         }
@@ -288,7 +312,7 @@ public:
     Result<Success> Submit(ReadRequest request, ReadCallback callback) override {
         auto file = std::dynamic_pointer_cast<const NativeFile>(request.file);
         const auto& block = request.block;
-        if (!callback || !file || !request.buffer ||
+        if (!callback || !file || file->overlapped || !request.buffer ||
             block.file_id != file->Id() || block.byte_count == 0 ||
             block.aligned_offset > file->SizeBytes() ||
             block.byte_count > file->SizeBytes() - block.aligned_offset ||
@@ -388,6 +412,164 @@ public:
     }
 };
 
+class IocpBackend final : public MeteredReadBackend {
+    struct Operation {
+        OVERLAPPED overlapped{};
+        ReadRequest request{};
+        ReadCallback callback;
+    };
+    std::shared_ptr<const BudgetReservation> reservation_;
+    std::vector<Operation> slots_;
+    Handle port_;
+    mutable std::mutex mutex_;
+    std::mutex drain_mutex_;
+    std::condition_variable drained_;
+    ReadBackendStats stats_;
+    bool closed_ = false;
+    std::thread worker_;
+    const ReadRequest* completing_ = nullptr;
+
+    void Complete() {
+        const HANDLE port = port_.Get();
+        for (;;) {
+            DWORD bytes = 0;
+            ULONG_PTR key = 0;
+            OVERLAPPED* overlapped = nullptr;
+            const BOOL ok = GetQueuedCompletionStatus(port, &bytes, &key, &overlapped, INFINITE);
+            DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+            if (!overlapped) return;
+
+            Operation done;
+            {
+                std::lock_guard lock(mutex_);
+                auto slot = std::find_if(slots_.begin(), slots_.end(), [overlapped](auto& item) {
+                    return &item.overlapped == overlapped;
+                });
+                if (slot == slots_.end() || !slot->callback) std::terminate();
+                done = std::move(*slot);
+                *slot = {};
+                if (ok && bytes != done.request.block.byte_count) error = ERROR_HANDLE_EOF;
+                stats_.io_read_bytes_completed += bytes;
+                stats_.io_read_errors += error != ERROR_SUCCESS;
+                --stats_.inflight_reads;
+                completing_ = &done.request;
+                drained_.notify_all();
+            }
+            // The packet is dequeued. Keep the request leases on this thread
+            // until the callback returns, even if that callback admits new I/O.
+            if (error != ERROR_SUCCESS)
+                done.callback(SystemError("IOCP read failed or short", error));
+            else
+                done.callback(ReadCompletion{done.request.request_id, bytes});
+            {
+                std::lock_guard lock(mutex_);
+                completing_ = nullptr;
+            }
+        }
+    }
+
+public:
+    IocpBackend(HANDLE port, std::uint32_t capacity,
+                std::shared_ptr<const BudgetReservation> reservation)
+        : reservation_(std::move(reservation)), slots_(capacity), port_(port) {}
+
+    void Start() { worker_ = std::thread([this] { Complete(); }); }
+    ~IocpBackend() override { static_cast<void>(Drain()); }
+
+    Result<Success> Submit(ReadRequest request, ReadCallback callback) override {
+        const auto* file = dynamic_cast<const NativeFile*>(request.file.get());
+        const auto& block = request.block;
+        const auto buffer = request.buffer ? request.buffer->WritableBytes() : std::span<std::byte>{};
+        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
+        if (!callback || !file || !file->overlapped || !address ||
+            block.file_id != file->Id() || !block.byte_count ||
+            block.aligned_offset > file->SizeBytes() ||
+            block.byte_count > file->SizeBytes() - block.aligned_offset ||
+            block.byte_count > buffer.size() || address % file->alignment ||
+            block.byte_count % file->alignment || block.aligned_offset % file->alignment ||
+            (request.priority != ReadPriority::demand &&
+             request.priority != ReadPriority::prefetch &&
+             request.priority != ReadPriority::background))
+            return Invalid("Invalid IOCP read request");
+        std::lock_guard lock(mutex_);
+        if (closed_) return Error{ErrorCode::closed, "IOCP backend drained"};
+        const auto conflicts = [&](const ReadRequest& active) {
+            const auto other = reinterpret_cast<std::uintptr_t>(
+                active.buffer->WritableBytes().data());
+            const auto size = active.buffer->WritableBytes().size();
+            return active.request_id == request.request_id ||
+                (address >= other ? address - other < size : other - address < buffer.size());
+        };
+        if (completing_ && conflicts(*completing_))
+            return Invalid("Duplicate completing ID or overlapping buffer");
+        Operation* slot = nullptr;
+        for (auto& active : slots_) {
+            if (!active.callback) {
+                if (!slot) slot = &active;
+                continue;
+            }
+            if (conflicts(active.request))
+                return Invalid("Duplicate in-flight ID or overlapping buffer");
+        }
+        if (!slot) return Exhausted();
+        {
+            std::lock_guard file_lock(file->io_mutex);
+            if (!file->completion_port) {
+                if (!CreateIoCompletionPort(file->NativeHandle(), port_.Get(), 0, 0))
+                    return SystemError("Associate file with IOCP", GetLastError());
+                file->completion_port = port_.Get();
+            } else if (file->completion_port != port_.Get()) {
+                return Invalid("File belongs to another IOCP backend");
+            }
+        }
+        slot->overlapped.Offset = static_cast<DWORD>(block.aligned_offset);
+        slot->overlapped.OffsetHigh = static_cast<DWORD>(block.aligned_offset >> 32);
+        const DWORD length = block.byte_count;
+        slot->request = std::move(request);
+        slot->callback = std::move(callback);
+        ++stats_.io_reads_submitted;
+        if (!ReadFile(file->NativeHandle(), buffer.data(), length, nullptr, &slot->overlapped)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_IO_PENDING) {
+                *slot = {};
+                ++stats_.io_read_errors;
+                return SystemError("Submit IOCP ReadFile", error);
+            }
+        }
+        // Immediate success also produces a completion packet.
+        ++stats_.inflight_reads;
+        return Success{};
+    }
+
+    Result<Success> Drain() override {
+        std::lock_guard drain_lock(drain_mutex_);
+        {
+            std::unique_lock lock(mutex_);
+            closed_ = true;
+            drained_.wait(lock, [&] { return stats_.inflight_reads == 0; });
+        }
+        if (worker_.joinable()) {
+            if (!PostQueuedCompletionStatus(port_.Get(), 0, 0, nullptr)) {
+                const DWORD error = GetLastError();
+                CloseHandle(port_.Release());
+                worker_.join();
+                return SystemError("Stop IOCP worker", error);
+            }
+            worker_.join();
+        }
+        return Success{};
+    }
+
+    ReadBackendStats Stats() const override {
+        std::lock_guard lock(mutex_);
+        return stats_;
+    }
+
+    static std::uint64_t StorageBytes(std::uint32_t capacity) {
+        return sizeof(IocpBackend) + sizeof(Operation) * std::uint64_t{capacity} + 256;
+    }
+};
+
 }  // namespace
 
 Result<std::shared_ptr<ResourceGovernor>> CreateResourceGovernor(
@@ -405,14 +587,20 @@ Result<std::shared_ptr<ResourceGovernor>> CreateResourceGovernor(
     }
 }
 
+std::uint64_t MemoryAccountedBytes(const ResourceGovernor& governor) {
+    const auto* native = dynamic_cast<const Governor*>(&governor);
+    return native ? native->AccountedBytes() : 0;
+}
+
 Result<std::unique_ptr<FileRegistry>> CreateSynchronousFileRegistry(
-    std::shared_ptr<ResourceGovernor> governor, const SynchronousStorageOptions& options) {
+    std::shared_ptr<ResourceGovernor> governor, const SynchronousStorageOptions& options,
+    std::function<void(FileId)> on_retire) {
     if (!governor || !options.max_registered_files) return Invalid("Invalid registry options");
     auto reserved = governor->TryReserve({MemoryRegion::metadata, sizeof(Registry) + 256});
     if (const auto* error = std::get_if<Error>(&reserved)) return *error;
     try {
         return std::unique_ptr<FileRegistry>(std::make_unique<Registry>(
-            std::move(governor), options,
+            std::move(governor), options, std::move(on_retire),
             std::get<std::shared_ptr<const BudgetReservation>>(std::move(reserved))));
     } catch (const std::bad_alloc&) {
         return Exhausted();
@@ -447,6 +635,11 @@ Result<std::uint32_t> ReadAlignment(const FileLease& file) {
     return Invalid("File lease was not created by synchronous registry");
 }
 
+bool ReadFileRetired(const FileLease& file) noexcept {
+    const auto* native = dynamic_cast<const NativeFile*>(&file);
+    return native && native->retired.load();
+}
+
 Result<std::unique_ptr<SynchronousReadBackend>> CreateSynchronousReadBackend(
     std::shared_ptr<ResourceGovernor> governor, const SynchronousStorageOptions& options) {
     if (!governor || !options.max_inflight_reads) return Invalid("Invalid read capacity");
@@ -460,6 +653,27 @@ Result<std::unique_ptr<SynchronousReadBackend>> CreateSynchronousReadBackend(
                 std::get<std::shared_ptr<const BudgetReservation>>(std::move(reserved))));
     } catch (const std::bad_alloc&) {
         return Exhausted();
+    }
+}
+
+Result<std::unique_ptr<MeteredReadBackend>> CreateIocpReadBackend(
+    std::shared_ptr<ResourceGovernor> governor, std::uint32_t capacity) {
+    if (!governor || !capacity) return Invalid("Invalid IOCP read capacity");
+    auto reserved = governor->TryReserve({MemoryRegion::metadata, IocpBackend::StorageBytes(capacity)});
+    if (const auto* error = std::get_if<Error>(&reserved)) return *error;
+    const auto native = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1);
+    if (!native) return SystemError("Create IOCP", GetLastError());
+    Handle port(native);
+    try {
+        auto backend = std::make_unique<IocpBackend>(port.Get(), capacity,
+            std::get<std::shared_ptr<const BudgetReservation>>(std::move(reserved)));
+        port.Release();
+        backend->Start();
+        return std::unique_ptr<MeteredReadBackend>(std::move(backend));
+    } catch (const std::bad_alloc&) {
+        return Exhausted();
+    } catch (const std::system_error&) {
+        return Error{ErrorCode::resource_exhausted, "Cannot start IOCP completion worker"};
     }
 }
 

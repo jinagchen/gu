@@ -168,6 +168,11 @@ struct EngineStats {
     std::uint64_t logical_update_bytes = 0;
     std::uint64_t pending_write_count = 0;
     std::uint64_t merge_backlog_bytes = 0;
+    std::uint64_t cache_hits = 0;
+    std::uint64_t cache_misses = 0;
+    std::uint64_t prefetch_ready_at_demand = 0;
+    std::uint32_t peak_inflight_reads = 0;
+    std::uint32_t peak_prefetch_reads = 0;
 };
 
 // Declaration-only contract. No engine implementation is supplied here.
@@ -191,6 +196,8 @@ public:
         VectorId id, std::span<const float> values, const WriteOptions& options);
     Result<CheckpointReceipt> Checkpoint(std::chrono::milliseconds timeout);
     Result<EngineStats> Stats() const;
+    // Wait for reads from already joined query workers before taking a snapshot.
+    Result<Success> QuiesceReads(std::chrono::steady_clock::time_point deadline);
     Result<Success> Close();
 
 private:

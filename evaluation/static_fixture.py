@@ -203,6 +203,7 @@ def main(argv=None):
     engine = json.loads((Path(__file__).resolve().parents[1] /
                          "configs/examples/static-run.json").read_text(encoding="utf-8"))["engine"]
     engine["directory"] = "index"
+    engine["cache_policy"] = "disabled"
     config = {
         "schema_version": 1,
         "protocol_version": PROTOCOL,

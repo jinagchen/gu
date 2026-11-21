@@ -1,5 +1,5 @@
 #include "agent_io/engine.hpp"
-#include "agent_io/synchronous_storage.hpp"
+#include "agent_io/optimized_storage.hpp"
 
 #include "../index/reader.hpp"
 
@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <shared_mutex>
 
 namespace agent_io {
 namespace {
@@ -19,6 +20,11 @@ Error Failure(ErrorCode code, std::string message) {
 }
 
 class StaticLifetime final : public ReadViewLifetime {};
+
+struct QuerySlot {
+    std::atomic<std::uint32_t>* count = nullptr;
+    ~QuerySlot() { if (count) --*count; }
+};
 
 std::uint32_t BlocksPerRow(const NodeRecordLayout& layout, std::uint32_t block_bytes) {
     if (block_bytes == 0) return 1;
@@ -34,8 +40,8 @@ struct Engine::Impl {
     Manifest manifest;
     std::shared_ptr<ResourceGovernor> governor;
     std::shared_ptr<FileRegistry> registry;
-    std::shared_ptr<SynchronousReadBackend> backend;
-    std::shared_ptr<BlockReader> reader;
+    std::shared_ptr<MeteredReadBackend> backend;
+    std::shared_ptr<OptimizedBlockReader> reader;
     std::unique_ptr<IndexAdapter> adapter;
     VectorAccess* access = nullptr;
     ReadView view;
@@ -43,12 +49,12 @@ struct Engine::Impl {
     std::uint64_t unbudgeted_metadata_bytes = 0;
     std::uint64_t manifest_generation = 0;
     std::uint64_t live_count = 0;
-    std::atomic<std::uint64_t> accounted_bytes{0};
-    mutable std::mutex mutex;
+    std::atomic<std::uint32_t> active_queries{0};
+    mutable std::shared_mutex mutex;
     bool closed = false;
 
     ~Impl() {
-        if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+        if (!closed) Release();
     }
 
     void Release() {
@@ -80,6 +86,21 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
         return Failure(ErrorCode::invalid_argument, "block_bytes must be a power of two");
     if (options.max_queries == 0)
         return Failure(ErrorCode::invalid_argument, "max_queries must be positive");
+    if (!options.max_inflight_reads ||
+        (options.io_backend != IoBackend::synchronous &&
+         options.io_backend != IoBackend::windows_iocp) ||
+        (options.cache_policy != CachePolicy::disabled && options.cache_policy != CachePolicy::clock))
+        return Failure(ErrorCode::invalid_argument, "Invalid read backend, capacity or cache policy");
+    const bool iocp = options.io_backend == IoBackend::windows_iocp;
+    const bool cache = options.cache_policy == CachePolicy::clock && options.memory.cache_bytes > 0;
+    const auto prefetch = iocp && cache ? options.max_prefetch_reads : 0u;
+    if (prefetch && (!options.read_scheduling.demand_reserve ||
+        options.read_scheduling.demand_reserve >= options.max_inflight_reads ||
+        options.read_scheduling.background_reserve >
+            options.max_inflight_reads - options.read_scheduling.demand_reserve ||
+        prefetch > options.max_inflight_reads - options.read_scheduling.demand_reserve -
+            options.read_scheduling.background_reserve))
+        return Failure(ErrorCode::invalid_argument, "Invalid prefetch read reservations");
 
     std::error_code path_error;
     if (!std::filesystem::is_directory(directory, path_error))
@@ -111,24 +132,31 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
     storage.max_registered_files = (std::max)(std::uint32_t{64},
         options.resources.max_disk_segments * 2u);
     storage.max_inflight_reads = options.max_inflight_reads;
-    auto registry = CreateSynchronousFileRegistry(impl->governor, storage);
+    storage.overlapped = iocp;
+    if (iocp) {
+        auto backend = CreateIocpReadBackend(impl->governor, storage.max_inflight_reads);
+        if (const auto* error = std::get_if<Error>(&backend)) return *error;
+        impl->backend = std::get<std::unique_ptr<MeteredReadBackend>>(std::move(backend));
+    } else {
+        auto backend = CreateSynchronousReadBackend(impl->governor, storage);
+        if (const auto* error = std::get_if<Error>(&backend)) return *error;
+        impl->backend = std::get<std::unique_ptr<SynchronousReadBackend>>(std::move(backend));
+    }
+    auto reader = CreateOptimizedBlockReader(impl->governor, impl->backend,
+        {options.max_inflight_reads, prefetch, cache});
+    if (const auto* error = std::get_if<Error>(&reader)) return *error;
+    impl->reader = std::get<std::unique_ptr<OptimizedBlockReader>>(std::move(reader));
+
+    auto registry = CreateSynchronousFileRegistry(impl->governor, storage,
+        [weak = std::weak_ptr(impl->reader)](FileId file) {
+            if (auto held = weak.lock()) held->Retire(file);
+        });
     if (const auto* error = std::get_if<Error>(&registry)) return *error;
     impl->registry = std::shared_ptr<FileRegistry>(
         std::get<std::unique_ptr<FileRegistry>>(std::move(registry)));
 
-    auto backend = CreateSynchronousReadBackend(impl->governor, storage);
-    if (const auto* error = std::get_if<Error>(&backend)) return *error;
-    auto owned_backend = std::get<std::unique_ptr<SynchronousReadBackend>>(std::move(backend));
-    impl->backend = std::shared_ptr<SynchronousReadBackend>(std::move(owned_backend));
-
-    auto reader = CreateSynchronousBlockReader(impl->governor, impl->backend,
-                                               options.max_inflight_reads);
-    if (const auto* error = std::get_if<Error>(&reader)) return *error;
-    impl->reader = std::shared_ptr<BlockReader>(
-        std::get<std::unique_ptr<BlockReader>>(std::move(reader)));
-
     auto opened = OpenIndexDirectory(directory, impl->reader, impl->registry,
-                                     options.block_bytes);
+                                     options.block_bytes, options.max_inflight_reads);
     if (const auto* error = std::get_if<Error>(&opened)) return *error;
     auto index = std::get<OpenedIndex>(std::move(opened));
     impl->manifest = index.manifest;
@@ -179,14 +207,21 @@ Result<SearchResult> Engine::Search(std::span<const float> query,
         return Failure(ErrorCode::invalid_argument, "candidate_limit is out of range");
     if (options.timeout.count() <= 0)
         return Failure(ErrorCode::invalid_argument, "timeout must be positive");
+    if (options.prefetch_blocks > impl.options.max_prefetch_reads)
+        return Failure(ErrorCode::invalid_argument, "Query prefetch exceeds the engine cap");
 
+    std::shared_lock guard(impl.mutex);
+    if (impl.closed) return Failure(ErrorCode::closed, "Engine is closed");
+    auto slot = std::make_shared<QuerySlot>();
+    auto active = impl.active_queries.load();
+    do {
+        if (active >= impl.options.max_queries)
+            return Failure(ErrorCode::resource_exhausted, "Query admission capacity exhausted");
+    } while (!impl.active_queries.compare_exchange_weak(active, active + 1));
+    slot->count = &impl.active_queries;
     ReadViewLease lease;
-    {
-        std::lock_guard<std::mutex> guard(impl.mutex);
-        if (impl.closed) return Failure(ErrorCode::closed, "Engine is closed");
-        lease.view = impl.view;
-        lease.lifetime = impl.lifetime;
-    }
+    lease.view = impl.view;
+    lease.lifetime = impl.lifetime;
     const auto started = std::chrono::steady_clock::now();
     const auto deadline = started + options.timeout;
 
@@ -229,19 +264,19 @@ Result<SearchResult> Engine::Search(std::span<const float> query,
     if (const auto* error = std::get_if<Error>(&plan)) return *error;
 
     auto reservation = impl.governor->TryReserve(
-        MemoryCharge{MemoryRegion::workspace, std::get<ScratchPlan>(plan).total_bytes});
+        MemoryCharge{MemoryRegion::workspace,
+            std::get<ScratchPlan>(plan).total_bytes + sizeof(QueryReadState) + 256});
     if (const auto* error = std::get_if<Error>(&reservation)) return *error;
-    const auto held = std::get<std::shared_ptr<const BudgetReservation>>(reservation);
-    impl.accounted_bytes += std::get<ScratchPlan>(plan).total_bytes;
-    struct CounterGuard {
-        std::atomic<std::uint64_t>& counter;
-        std::uint64_t bytes;
-        ~CounterGuard() { counter -= bytes; }
-    } counter_guard{impl.accounted_bytes, std::get<ScratchPlan>(plan).total_bytes};
-    static_cast<void>(held);
+    auto query_reads = std::make_shared<QueryReadState>();
+    query_reads->admission = slot;
+    query_reads->workspace = std::get<std::shared_ptr<const BudgetReservation>>(std::move(reservation));
+    if (impl.options.io_backend == IoBackend::windows_iocp &&
+        impl.options.cache_policy == CachePolicy::clock && impl.options.memory.cache_bytes)
+        query_reads->prefetch_limit = options.prefetch_blocks;
+    QueryReadScope read_scope(query_reads);
 
     const ExpansionRequest request{query, lease, budget, options.k, deadline,
-                                   options.prefetch_blocks};
+                                   query_reads->prefetch_limit};
     auto expanded = impl.adapter->Expand(request);
     if (const auto* error = std::get_if<Error>(&expanded)) return *error;
     auto expansion = std::get<ExpansionResult>(std::move(expanded));
@@ -260,9 +295,9 @@ Result<SearchResult> Engine::Search(std::span<const float> query,
         neighbour.squared_distance = candidate.exact_distance.value_or(0.0);
         result.neighbors.push_back(neighbour);
     }
-    result.metrics.logical_block_demands = expansion.logical_blocks_read;
-    result.metrics.cache_hits = 0;
-    result.metrics.cache_misses = expansion.logical_blocks_read;
+    result.metrics.cache_hits = query_reads->cache_hits;
+    result.metrics.cache_misses = query_reads->cache_misses;
+    result.metrics.logical_block_demands = result.metrics.cache_hits + result.metrics.cache_misses;
     result.metrics.delta_records_scanned = 0;
     result.metrics.candidate_limit_reached = expansion.candidate_limit_reached;
     result.metrics.elapsed_ns = static_cast<std::uint64_t>(
@@ -275,12 +310,9 @@ Result<StoredVector> Engine::Get(VectorId id) {
     if (!impl_) return Failure(ErrorCode::closed, "Engine is closed");
     Impl& impl = *impl_;
     if (id == 0) return Failure(ErrorCode::invalid_argument, "Logical ID must be non-zero");
-    ReadView view;
-    {
-        std::lock_guard<std::mutex> guard(impl.mutex);
-        if (impl.closed) return Failure(ErrorCode::closed, "Engine is closed");
-        view = impl.view;
-    }
+    std::shared_lock guard(impl.mutex);
+    if (impl.closed) return Failure(ErrorCode::closed, "Engine is closed");
+    const auto& view = impl.view;
     std::optional<VersionDirectoryEntry> best;
     for (std::uint32_t index = 0; index < view.segment_count; ++index) {
         const auto found = impl.access->FindId(view.segments[index].id, id);
@@ -324,13 +356,13 @@ Result<CheckpointReceipt> Engine::Checkpoint(std::chrono::milliseconds) {
 Result<EngineStats> Engine::Stats() const {
     if (!impl_) return Failure(ErrorCode::closed, "Engine is closed");
     const Impl& impl = *impl_;
+    std::shared_lock guard(impl.mutex);
     EngineStats stats;
     stats.published_sequence = 0;
     stats.checkpoint_sequence = impl.manifest.checkpoint_sequence;
     stats.view_generation = impl.view.view_generation;
     stats.live_vectors = impl.live_count;
-    stats.memory_accounted_bytes = impl.accounted_bytes.load();
-    stats.cache_resident_bytes = 0;
+    if (impl.governor) stats.memory_accounted_bytes = MemoryAccountedBytes(*impl.governor);
     stats.delta_resident_bytes = 0;
     stats.retired_pinned_bytes = 0;
     if (impl.backend) {
@@ -339,8 +371,17 @@ Result<EngineStats> Engine::Stats() const {
         stats.io_read_bytes_completed = counters.io_read_bytes_completed;
         stats.io_read_errors = counters.io_read_errors;
     }
-    stats.prefetch_submitted = 0;
-    stats.prefetch_consumed = 0;
+    if (impl.reader) {
+        const auto reads = impl.reader->Stats();
+        stats.cache_resident_bytes = reads.cache_resident_bytes;
+        stats.cache_hits = reads.cache_hits;
+        stats.cache_misses = reads.cache_misses;
+        stats.prefetch_submitted = reads.prefetch_submitted;
+        stats.prefetch_consumed = reads.prefetch_consumed;
+        stats.prefetch_ready_at_demand = reads.prefetch_ready_at_demand;
+        stats.peak_inflight_reads = reads.peak_inflight_reads;
+        stats.peak_prefetch_reads = reads.peak_prefetch_reads;
+    }
     stats.wal_bytes_written = 0;
     stats.checkpoint_bytes_written = 0;
     stats.merge_bytes_written = 0;
@@ -350,9 +391,16 @@ Result<EngineStats> Engine::Stats() const {
     return stats;
 }
 
+Result<Success> Engine::QuiesceReads(std::chrono::steady_clock::time_point deadline) {
+    if (!impl_) return Failure(ErrorCode::closed, "Engine is closed");
+    std::shared_lock guard(impl_->mutex);
+    if (impl_->closed) return Failure(ErrorCode::closed, "Engine is closed");
+    return impl_->reader->Quiesce(deadline);
+}
+
 Result<Success> Engine::Close() {
     if (!impl_) return Failure(ErrorCode::closed, "Engine is closed");
-    std::lock_guard<std::mutex> guard(impl_->mutex);
+    std::unique_lock guard(impl_->mutex);
     if (impl_->closed) return Failure(ErrorCode::closed, "Engine is already closed");
     impl_->Release();
     return Success{};
