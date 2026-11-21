@@ -11,6 +11,26 @@ target_compile_features(agent_io_contracts PRIVATE cxx_std_20)
 add_library(agent_io_index_contracts OBJECT tools/contracts/header-smoke-b.cpp)
 target_compile_features(agent_io_index_contracts PRIVATE cxx_std_20)
 
+add_library(agent_io_index STATIC
+    src/index/json.cpp src/index/digest.cpp src/index/format.cpp
+    src/index/manifest.cpp src/index/scratch.cpp src/index/adapter.cpp
+    src/index/builder.cpp)
+target_include_directories(agent_io_index PUBLIC include)
+target_compile_features(agent_io_index PUBLIC cxx_std_20)
+target_compile_definitions(agent_io_index PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_link_libraries(agent_io_index PUBLIC agent_io_storage PRIVATE bcrypt)
+
+add_library(agent_io_engine STATIC src/engine/engine.cpp)
+target_include_directories(agent_io_engine PUBLIC include)
+target_compile_features(agent_io_engine PUBLIC cxx_std_20)
+target_compile_definitions(agent_io_engine PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_link_libraries(agent_io_engine PUBLIC agent_io_index)
+
+add_executable(vector_build tools/build/main.cpp)
+target_link_libraries(vector_build PRIVATE agent_io_index)
+
 add_library(agent_io_storage STATIC
     src/storage/synchronous_storage.cpp src/storage/synchronous_block_reader.cpp)
 target_include_directories(agent_io_storage PUBLIC include)
@@ -27,6 +47,9 @@ target_link_libraries(agent_io_benchmark PUBLIC agent_io_storage PRIVATE psapi)
 
 add_executable(benchmark_runner_test tests/benchmark/benchmark-runner-test.cpp)
 target_link_libraries(benchmark_runner_test PRIVATE agent_io_benchmark)
+
+add_executable(index_engine_test tests/index/index-engine-test.cpp)
+target_link_libraries(index_engine_test PRIVATE agent_io_engine)
 
 add_executable(synchronous_storage_test tests/storage/synchronous-storage-test.cpp)
 target_link_libraries(synchronous_storage_test PRIVATE agent_io_storage)
@@ -46,8 +69,9 @@ target_link_libraries(job_runner PRIVATE psapi)
 
 if(MSVC)
     foreach(target agent_io_contracts agent_io_index_contracts
-                   agent_io_storage agent_io_benchmark benchmark_runner_test
-                   synchronous_storage_test
+                   agent_io_storage agent_io_index agent_io_engine
+                   agent_io_benchmark benchmark_runner_test index_engine_test
+                   synchronous_storage_test vector_build
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
@@ -55,6 +79,8 @@ endif()
 
 # Reuse the pinned Boost 1.78 headers already installed for DiskANN. Core
 # storage and runner builds remain independent of this CLI-only JSON library.
+set(AGENT_IO_TEST_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe"
+    CACHE FILEPATH "Python for native producer and contract integration tests")
 find_path(AGENT_IO_BOOST_INCLUDE boost/json/src.hpp HINTS
     "${AGENT_IO_DISKANN_PACKAGES}/boost/lib/native/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/build/diskann/packages/boost/lib/native/include")
@@ -64,7 +90,9 @@ if(AGENT_IO_BOOST_INCLUDE)
     target_compile_definitions(agent_io_benchmark_json PUBLIC
         BOOST_JSON_NO_LIB BOOST_CONTAINER_NO_LIB)
     target_compile_features(agent_io_benchmark_json PUBLIC cxx_std_20)
-    add_executable(vector_bench tools/benchmark/main.cpp tools/benchmark/config.cpp)
+    add_executable(vector_bench tools/benchmark/main.cpp tools/benchmark/config.cpp
+        tools/benchmark/engine-target.cpp)
+    target_link_libraries(vector_bench PRIVATE agent_io_engine)
     target_link_libraries(vector_bench PRIVATE agent_io_benchmark agent_io_benchmark_json)
     target_compile_definitions(vector_bench PRIVATE
         WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
@@ -79,19 +107,32 @@ if(AGENT_IO_BOOST_INCLUDE)
     else()
         set(AGENT_IO_DIRTY_VALUE "false")
     endif()
+    # A source snapshot without git metadata still has to disclose provenance:
+    # the field is required by EVAL-1.1 and must never be an empty string.
+    if(NOT AGENT_IO_BUILD_COMMIT)
+        set(AGENT_IO_BUILD_COMMIT "unavailable-no-git-metadata")
+    endif()
     target_compile_definitions(vector_bench PRIVATE
         AGENT_IO_BUILD_COMMIT="${AGENT_IO_BUILD_COMMIT}"
         AGENT_IO_BUILD_DIRTY="${AGENT_IO_DIRTY_VALUE}")
     if(MSVC)
         target_compile_options(vector_bench PRIVATE /W4 /WX /permissive- /EHsc)
     endif()
-    set(AGENT_IO_TEST_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe"
-        CACHE FILEPATH "Python for native producer integration tests")
 else()
     message(STATUS "vector_bench CLI disabled: set AGENT_IO_BOOST_INCLUDE to pinned Boost 1.78")
 endif()
 
 enable_testing()
+if(EXISTS "${AGENT_IO_TEST_PYTHON}")
+    add_test(NAME stage3_b_contracts COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/check-stage3-b.py")
+    add_test(NAME stage3_b_regressions COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/test-stage3-b.py")
+    add_test(NAME stage3_manifest_contract COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/test-stage3-freeze.py")
+    set_tests_properties(stage3_b_contracts stage3_b_regressions stage3_manifest_contract
+        PROPERTIES TIMEOUT 60)
+endif()
 add_test(NAME benchmark_runner COMMAND benchmark_runner_test)
 set_tests_properties(benchmark_runner PROPERTIES TIMEOUT 30)
 if(TARGET vector_bench AND EXISTS "${AGENT_IO_TEST_PYTHON}")
@@ -100,6 +141,17 @@ if(TARGET vector_bench AND EXISTS "${AGENT_IO_TEST_PYTHON}")
         --binary $<TARGET_FILE:vector_bench> --job-runner $<TARGET_FILE:job_runner>
         --output-parent "${CMAKE_CURRENT_BINARY_DIR}/benchmark-cli-$<CONFIG>")
     set_tests_properties(benchmark_cli PROPERTIES TIMEOUT 60)
+endif()
+add_test(NAME index_engine COMMAND index_engine_test)
+set_tests_properties(index_engine PROPERTIES TIMEOUT 120)
+if(TARGET vector_build AND EXISTS "${AGENT_IO_TEST_PYTHON}")
+    # The refusal matrix: every rejected configuration must leave the published
+    # index byte-identical, so this has to run against the real binaries.
+    add_test(NAME build_contract COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/check-build.py"
+        --binary $<TARGET_FILE:vector_build> --job-runner $<TARGET_FILE:job_runner>
+        --output "${CMAKE_CURRENT_BINARY_DIR}/build-contract-$<CONFIG>")
+    set_tests_properties(build_contract PROPERTIES TIMEOUT 120)
 endif()
 add_test(NAME synchronous_storage COMMAND synchronous_storage_test)
 set_tests_properties(synchronous_storage PROPERTIES TIMEOUT 30)
