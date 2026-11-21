@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "engine-target.hpp"
 #include "agent_io/synchronous_storage.hpp"
 
 #include <windows.h>
@@ -45,6 +46,41 @@ std::uint32_t OptionNumber(const wchar_t* text) {
     const auto parsed = std::stoull(value);
     if (parsed > 60000) throw ConfigError("Test option exceeds 60000");
     return static_cast<std::uint32_t>(parsed);
+}
+
+// Artifacts this process owns. An existing directory is accepted only when it
+// holds none of them, so a prepared run directory may carry its inputs, index,
+// trace and Job evidence while a previous result can never be overwritten.
+constexpr const char* kOwnedArtifacts[] = {
+    "effective-config.json", "environment.json", "counters.json", "summary.json",
+    "queries.jsonl", "writes.jsonl", "samples.jsonl", "stdout.log", "stderr.log",
+    "evaluation.json"};
+
+void PrepareOutputDirectory(const std::filesystem::path& output) {
+    std::error_code error;
+    if (!std::filesystem::exists(output, error)) {
+        if (!std::filesystem::create_directory(output, error))
+            throw ConfigError("Output must be a new directory with an existing parent");
+        return;
+    }
+    if (!std::filesystem::is_directory(output, error))
+        throw ConfigError("Output path exists and is not a directory");
+    for (const char* name : kOwnedArtifacts)
+        if (std::filesystem::exists(output / name, error))
+            throw ConfigError("Output directory already holds run artifacts");
+}
+
+// EVAL-1.1 requires every recorded artifact path to stay run-relative. Evidence
+// written into the run directory is recorded relative to it; anything outside is
+// still reported, but by absolute path, which a checker will reject as unreachable.
+std::string EvidencePath(const Arguments& arguments) {
+    if (arguments.job_metrics.empty()) return {};
+    const auto absolute = std::filesystem::absolute(arguments.job_metrics).lexically_normal();
+    std::error_code error;
+    const auto relative = std::filesystem::relative(absolute, arguments.output, error);
+    if (!error && !relative.empty() && relative.native().rfind(L"..", 0) != 0)
+        return Utf8(relative);
+    return Utf8(absolute);
 }
 
 Arguments ParseArguments(int argc, wchar_t** argv) {
@@ -188,7 +224,7 @@ json::object Environment(const Arguments& arguments, const Config& config,
         {"job_limit_unavailable_reason", job_limited ? json::value(nullptr) :
             json::value("No current Job memory limit could be established")},
         {"external_job_metrics", arguments.job_metrics.empty() ? json::value(nullptr) :
-            json::value(Utf8(std::filesystem::absolute(arguments.job_metrics)))},
+            json::value(EvidencePath(arguments))},
         {"sample_interval_ms", std::to_string(config.benchmark.sample_interval.count())},
         {"sampling_policy", "logger samples at actual times; congestion can delay samples"},
         {"workers", config.benchmark.limits.workers},
@@ -222,14 +258,166 @@ json::object Environment(const Arguments& arguments, const Config& config,
     }
     return output;
 }
+json::object EngineEnvironment(const Arguments& arguments, const Config& config,
+                                const EngineBenchmarkTarget& target, std::uint64_t load_ns,
+                                const BenchmarkReport* report) {
+    SYSTEM_INFO system{};
+    GetNativeSystemInfo(&system);
+    MEMORYSTATUSEX memory{};
+    memory.dwLength = sizeof(memory);
+    const bool memory_ok = GlobalMemoryStatusEx(&memory) != 0;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION job{};
+    const bool job_ok = QueryInformationJobObject(nullptr, JobObjectExtendedLimitInformation,
+        &job, sizeof(job), nullptr) != 0;
+    const bool job_limited = job_ok &&
+        (job.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY);
+    wchar_t root[MAX_PATH]{}, filesystem[MAX_PATH]{};
+    const bool volume_ok = GetVolumePathNameW(arguments.output.c_str(), root, MAX_PATH) &&
+        GetVolumeInformationW(root, nullptr, 0, nullptr, nullptr, nullptr, filesystem, MAX_PATH);
+    json::object output{
+        {"schema_version", 1}, {"protocol_version", "EVAL-1.1"},
+        {"purpose", config.benchmark.purpose}, {"run_id", config.benchmark.run_id},
+        {"target", "engine"}, {"formal_engine_measurement", true},
+        {"engine_options_applied", true},
+        {"input_content_used", true}, {"input_hashes_verified", true},
+        {"code_commit_at_configure", AGENT_IO_BUILD_COMMIT},
+        {"code_dirty_at_configure", AGENT_IO_BUILD_DIRTY},
+        {"compiler", "MSVC"}, {"compiler_version", _MSC_VER},
+        {"build_config", AGENT_IO_BUILD_CONFIG},
+        {"platform", "native Windows x64"},
+        {"os_version", nullptr}, {"os_version_unavailable_reason", "Not probed by this runner"},
+        {"logical_processors", system.dwNumberOfProcessors},
+        {"physical_memory_bytes", memory_ok ? json::value(std::to_string(memory.ullTotalPhys)) :
+            json::value(nullptr)},
+        {"cpu_affinity", nullptr}, {"cpu_affinity_unavailable_reason", "Not pinned by runner"},
+        {"pid", std::to_string(GetCurrentProcessId())},
+        {"participating_processes", "one C++ benchmark process; engine starts no children"},
+        {"measurement_domain", "runner, logger, workers, engine and block cache in current Job"},
+        {"job_limit_commit_bytes", job_limited ? json::value(std::to_string(job.JobMemoryLimit)) :
+            json::value(nullptr)},
+        {"job_limit_unavailable_reason", job_limited ? json::value(nullptr) :
+            json::value("No current Job memory limit could be established")},
+        {"external_job_metrics", arguments.job_metrics.empty() ? json::value(nullptr) :
+            json::value(EvidencePath(arguments))},
+        {"sample_interval_ms", std::to_string(config.benchmark.sample_interval.count())},
+        {"sampling_policy", "logger samples at actual times; congestion can delay samples"},
+        {"workers", config.benchmark.limits.workers},
+        {"runtime_threads", config.benchmark.limits.workers + std::uint64_t{2}},
+        {"thread_stack_accounting", "OS-managed stacks observed by external Job; not governor heaps"},
+        {"io_backend", config.engine.io_backend == IoBackend::windows_iocp ? "windows_iocp" :
+            "synchronous"},
+        {"direct_reads", config.engine.direct_reads},
+        {"verified_alignment", nullptr},
+        {"diskann", nullptr}, {"boost_json_version", "1.78.0"},
+        {"unbudgeted_metadata_bytes", std::to_string(target.UnbudgetedMetadataBytes())},
+        {"index_manifest_generation", std::to_string(target.ManifestGeneration())},
+        {"system_file_cache_bytes", nullptr},
+        {"system_file_cache_unavailable_reason", "Not observed"},
+        {"log_directory", Utf8(arguments.output)},
+        {"log_volume", volume_ok ? json::value(Utf8(std::filesystem::path(root))) :
+            json::value(nullptr)},
+        {"log_filesystem", volume_ok ? json::value(Utf8(std::filesystem::path(filesystem))) :
+            json::value(nullptr)},
+        {"log_policy", "bounded logger; binary UTF-8 JSONL; flush and close before counters"},
+        {"query_selection", "(seed % query_count + ordinal % query_count) % query_count"},
+        {"index_load_ns", std::to_string(load_ns)},
+        {"index_load_kind", "Engine::Open including CURRENT, manifest and file hash checks"},
+        {"cleanup_policy", "freeze publication at deadline; stop, join and quiesce target"},
+        {"limitations", json::array{
+            "Metadata reads at open are disclosed as unbudgeted, not counted as query I/O.",
+            "Graph edges use raw vectors; PQ codes are not implemented in this baseline.",
+            "Queue accounting is conservative, not an allocator or physical-memory proof.",
+            "Small-fixture recall does not establish the official memory ratio."}}};
+    if (report) {
+        output["runtime_workspace_bytes"] = std::to_string(report->resources.workspace_bytes);
+        output["log_bytes"] = std::to_string(report->query_log_bytes + report->sample_log_bytes);
+        output["warmup_elapsed_ns"] = std::to_string(report->warmup_elapsed_ns);
+        output["cleanup_ns"] = std::to_string(report->cleanup_ns);
+    }
+    return output;
+}
+
+int RunEngine(const Arguments& arguments, const Config& config, bool& output_created) {
+    auto governor = Take(CreateResourceGovernor(config.memory, config.engine.rebuild_memory));
+    const auto cli_memory = Take(governor->TryReserve({MemoryRegion::workspace, 4194304}));
+
+    EngineTargetConfig target_config;
+    target_config.index_directory = config.directory;
+    target_config.vectors = config.vectors;
+    target_config.ids = config.ids;
+    target_config.queries = config.queries;
+    target_config.query_ids = config.query_ids;
+    target_config.dimension = config.dimension;
+    target_config.query_count = config.benchmark.query_count;
+    target_config.vectors_sha256 = config.vectors_sha256;
+    target_config.ids_sha256 = config.ids_sha256;
+    target_config.queries_sha256 = config.queries_sha256;
+    target_config.query_ids_sha256 = config.query_ids_sha256;
+    target_config.engine = config.engine;
+    // Opening the index verifies CURRENT, the manifest, every segment file hash
+    // and the input hashes. Doing it before the output directory exists keeps a
+    // rejected configuration from leaving an empty run directory behind.
+    auto target = Take(EngineBenchmarkTarget::Open(target_config, governor));
+
+    PrepareOutputDirectory(arguments.output);
+    output_created = true;
+    Files files(arguments.output);
+    std::ofstream standard_log(arguments.output / "stdout.log", std::ios::binary);
+    std::ofstream error_log(arguments.output / "stderr.log", std::ios::binary);
+    if (!standard_log || !error_log) throw std::runtime_error("Open process logs failed");
+
+    auto effective = config.effective;
+    effective["unbudgeted_metadata_bytes"] =
+        json::string(std::to_string(target->UnbudgetedMetadataBytes()));
+    WriteJson(arguments.output / "effective-config.json", effective);
+    const auto load_ns = target->LoadNanoseconds();
+    WriteJson(arguments.output / "environment.json",
+              EngineEnvironment(arguments, config, *target, load_ns, nullptr));
+    auto result = RunStaticBenchmark(config.benchmark, *target, files, governor);
+    if (const auto* issue = std::get_if<Error>(&result)) {
+        error_log << issue->message << '\n';
+        error_log.close();
+        files.Close();
+        std::fprintf(stderr, "Benchmark failed: %s\n", issue->message.c_str());
+        return issue->code == ErrorCode::invalid_argument ? 2 : 4;
+    }
+    auto report = std::get<BenchmarkReport>(result);
+    if (!files.Close()) {
+        report.run_incomplete = true;
+        report.exit_code = 5;
+        report.diagnostic = "Streaming artifact close/flush failed";
+    }
+    WriteJson(arguments.output / "counters.json", Counters(config.benchmark, report));
+    WriteJson(arguments.output / "summary.json", Summary(config.benchmark, report));
+    WriteJson(arguments.output / "environment.json",
+              EngineEnvironment(arguments, config, *target, load_ns, &report));
+    const auto summary = json::serialize(Summary(config.benchmark, report));
+    standard_log << summary << '\n';
+    if (!report.diagnostic.empty()) error_log << report.diagnostic << '\n';
+    if (std::holds_alternative<Error>(target->Stats())) report.run_incomplete = true;
+    target.reset();
+    standard_log.close();
+    error_log.close();
+    if (!standard_log || !error_log) return 5;
+    std::printf("target=engine; formal_engine_measurement=true; "
+        "scheduled=%llu; succeeded=%llu; failed=%llu; rejected=%llu; pending=%llu; exit=%d\n",
+        static_cast<unsigned long long>(report.query.scheduled),
+        static_cast<unsigned long long>(report.query.succeeded),
+        static_cast<unsigned long long>(report.query.failed),
+        static_cast<unsigned long long>(report.query.rejected),
+        static_cast<unsigned long long>(report.query.pending), report.exit_code);
+    static_cast<void>(cli_memory);
+    return report.exit_code;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
     if (argc == 2 && std::wstring(argv[1]) == L"--help") {
         std::puts("vector_bench --config run.json --output new-directory "
-                  "[--target contract-test] [--job-metrics metrics.json]\n"
-                  "contract-test accepts only purpose=contract_example. "
-                  "The Engine target is not yet linked.\n"
+                  "[--target engine|contract-test] [--job-metrics metrics.json]\n"
+                  "engine is the real static target and requires verified input hashes.\n"
+                  "contract-test accepts only purpose=contract_example.\n"
                   "Test controls: --test-delay-ms N --test-error-every N (0..60000).");
         return 0;
     }
@@ -239,9 +427,11 @@ int wmain(int argc, wchar_t** argv) {
         auto arguments = ParseArguments(argc, argv);
         auto config = ReadConfig(arguments.config);
         if (arguments.target == L"engine") {
-            std::fputs("Engine target is not linked. Use --target contract-test only "
-                       "for producer verification; B must provide the real adapter.\n", stderr);
-            return 3;
+            if (arguments.test_flags)
+                throw ConfigError("Test flags require --target contract-test");
+            arguments.output = std::filesystem::absolute(arguments.output).lexically_normal();
+            output = arguments.output;
+            return RunEngine(arguments, config, output_created);
         }
         if (config.benchmark.purpose != "contract_example") {
             std::fputs("contract-test refuses purpose=measurement.\n", stderr);
@@ -249,9 +439,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         arguments.output = std::filesystem::absolute(arguments.output).lexically_normal();
         output = arguments.output;
-        std::error_code error;
-        if (!std::filesystem::create_directory(output, error))
-            throw ConfigError("Output must be a new directory with an existing parent");
+        PrepareOutputDirectory(output);
         output_created = true;
         auto governor = Take(CreateResourceGovernor(config.memory));
         // Retained config, stream buffers and post-run JSON summaries. OS stacks

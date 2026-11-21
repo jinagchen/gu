@@ -31,6 +31,13 @@ def load(path):
     return contract.load(path)
 
 
+def engine_block():
+    """A complete EVAL-1.1 engine block, pointing at an index that does not exist."""
+    block = deepcopy(load(ROOT / "configs/examples/static-run.json")["engine"])
+    block["directory"] = "index"
+    return block
+
+
 def check_artifacts(directory):
     effective = load(directory / "effective-config.json")
     contract.run_config(effective)
@@ -209,8 +216,23 @@ def main():
     require(int(outcomes["drain-timeout"]["counts"]["pending"]) > 0,
             "Drain timeout hid pending requests")
 
+    # The B-side Engine target is linked now, so "unavailable" is no longer a
+    # valid outcome. An engine run without the engine block is a configuration
+    # error, and a complete configuration that cannot open its index must fail
+    # before it leaves an output directory behind.
     config = deepcopy(template)
-    run_case("engine-unavailable", config, expected=3, target="engine")
+    run_case("engine-config-incomplete", config, expected=2, target="engine")
+    require(not (directory / "engine-config-incomplete/run").exists(),
+            "Refused engine configuration still created its output directory")
+    config = deepcopy(template)
+    config["engine"] = engine_block()
+    config["index"] = {"directory": "index", "build_id": "missing-index",
+                       "manifest_generation": "1"}
+    config["dataset"]["sha256"] = dict.fromkeys(config["dataset"]["sha256"], "0" * 64)
+    run_case("engine-index-refused", config, expected=2, target="engine")
+    require(not (directory / "engine-index-refused/run").exists(),
+            "Refused engine configuration still created its output directory")
+    config = deepcopy(template)
     config["purpose"] = "measurement"
     config["dataset"]["sha256"] = dict.fromkeys(config["dataset"]["sha256"], "0" * 64)
     run_case("measurement-refused", config, expected=3)

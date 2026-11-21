@@ -17,13 +17,27 @@ void Require(bool condition, const char* message) {
     if (!condition) throw ConfigError(message);
 }
 
+bool Listed(std::initializer_list<json::string_view> names, json::string_view key) {
+    for (auto name : names)
+        if (name == key) return true;
+    return false;
+}
+
+// Optional fields are declared explicitly: an unknown key is still a mistake,
+// but a run configuration may carry the evaluation sections that the Python
+// consumer needs.
 const json::object& Object(const json::value& value,
-                          std::initializer_list<json::string_view> fields) {
+                          std::initializer_list<json::string_view> fields,
+                          std::initializer_list<json::string_view> optional = {}) {
     Require(value.is_object(), "Expected JSON object");
     const auto& object = value.as_object();
-    Require(object.size() == fields.size(), "Unknown or missing configuration field");
+    Require(object.size() >= fields.size() && object.size() <= fields.size() + optional.size(),
+            "Unknown or missing configuration field");
     for (auto field : fields)
         Require(object.contains(field), "Unknown or missing configuration field");
+    for (const auto& member : object)
+        Require(Listed(fields, member.key()) || Listed(optional, member.key()),
+                "Unknown configuration field");
     return object;
 }
 
@@ -180,7 +194,8 @@ Config ReadConfig(const std::filesystem::path& path) {
             "Invalid JSON, duplicate key, nonfinite number or trailing content");
     const auto document = json::parse(text);
     const auto& root = Object(document, {"schema_version", "protocol_version", "purpose",
-        "run_id", "dataset", "engine", "search", "workload", "measurement"});
+        "run_id", "dataset", "engine", "search", "workload", "measurement"},
+        {"index", "trace", "answers", "unbudgeted_metadata_bytes"});
     Require(U32(root.at("schema_version")) == 1 &&
             Text(root.at("protocol_version")) == "EVAL-1.1", "Unsupported protocol");
     Config config;
@@ -190,13 +205,17 @@ Config ReadConfig(const std::filesystem::path& path) {
     Require(options.purpose == "measurement" || options.purpose == "contract_example",
             "Unsupported purpose");
     const auto& dataset = Object(root.at("dataset"), {"format", "vectors", "ids",
-        "queries", "query_ids", "vector_count", "query_count", "dimension", "metric", "sha256"});
+        "queries", "query_ids", "vector_count", "query_count", "dimension", "metric", "sha256"},
+        {"updates"});
     Require(Text(dataset.at("format")) == "raw-f32le-v1" &&
             Text(dataset.at("metric")) == "squared_l2", "Unsupported dataset format or metric");
     config.vector_count = U64(dataset.at("vector_count"), true);
     options.query_count = U64(dataset.at("query_count"), true);
     config.dimension = U32(dataset.at("dimension"), true);
-    const auto& hashes = Object(dataset.at("sha256"), {"vectors", "ids", "queries", "query_ids"});
+    // EVAL-1.1 discloses a hash for every dataset file, including the optional
+    // update payload; the static baseline has no writes and does not consume it.
+    const auto& hashes = Object(dataset.at("sha256"), {"vectors", "ids", "queries", "query_ids"},
+                                {"updates"});
     for (auto name : {"vectors", "ids", "queries", "query_ids"}) {
         Text(dataset.at(name));
         Checksum(hashes.at(name), options.purpose == "contract_example");
@@ -284,6 +303,72 @@ Config ReadConfig(const std::filesystem::path& path) {
         "Client byte cap below query bound");
     const auto plan = PlanStaticBenchmark(options);
     if (const auto* issue = std::get_if<Error>(&plan)) throw ConfigError(issue->message);
+    // Engine options are parsed here so the real target can open the index with
+    // exactly the validated numbers, not a second interpretation of the JSON.
+    {
+        auto& target = config.engine;
+        target.memory = config.memory;
+        if (!engine.at("rebuild_memory").is_null())
+            target.rebuild_memory = Memory(engine.at("rebuild_memory"));
+        target.io_backend = backend == "synchronous" ? IoBackend::synchronous :
+            IoBackend::windows_iocp;
+        target.cache_policy = cache == "disabled" ? CachePolicy::disabled : CachePolicy::clock;
+        target.direct_reads = engine.at("direct_reads").as_bool();
+        target.block_bytes = U32(engine.at("block_bytes"), true);
+        target.resources.max_disk_segments = U32(resources.at("max_disk_segments"), true);
+        target.resources.max_retained_generations =
+            U32(resources.at("max_retained_generations"), true);
+        target.resources.max_retained_delta_vectors = retained;
+        target.resources.background_workspace_bytes = background;
+        target.resources.min_free_disk_bytes = U64(resources.at("min_free_disk_bytes"));
+        target.read_scheduling.demand_reserve = demand;
+        target.read_scheduling.background_reserve = background_reserve;
+        target.read_scheduling.max_background_reads = background_max;
+        target.read_scheduling.demand_burst_before_background =
+            U32(scheduling.at("demand_burst_before_background"), true);
+        target.wal.rotation_bytes = U64(wal.at("rotation_bytes"), true);
+        target.wal.max_frame_bytes = static_cast<std::uint32_t>(frame);
+        target.max_queries = U32(engine.at("max_queries"), true);
+        target.max_pending_writes = U32(engine.at("max_pending_writes"), true);
+        target.max_inflight_reads = inflight;
+        target.max_prefetch_reads = prefetch;
+        target.max_delta_segments = U32(engine.at("max_delta_segments"), true);
+        target.group_commit_window = std::chrono::milliseconds(
+            static_cast<std::int64_t>(U64(engine.at("group_commit_window_ms"))));
+    }
+
+    config.vectors_sha256 = hashes.at("vectors").is_null() ? std::string{} :
+        Text(hashes.at("vectors"), 64);
+    config.ids_sha256 = hashes.at("ids").is_null() ? std::string{} : Text(hashes.at("ids"), 64);
+    config.queries_sha256 = hashes.at("queries").is_null() ? std::string{} :
+        Text(hashes.at("queries"), 64);
+    config.query_ids_sha256 = hashes.at("query_ids").is_null() ? std::string{} :
+        Text(hashes.at("query_ids"), 64);
+
+    if (const auto* index_section = root.if_contains("index")) {
+        const auto& index = Object(*index_section, {"directory", "build_id",
+                                                   "manifest_generation"}, {});
+        Text(index.at("build_id"), 128);
+        U64(index.at("manifest_generation"), true);
+        Require(Text(index.at("directory")) == Text(engine.at("directory")),
+                "index.directory must equal engine.directory");
+        config.complete_evaluation_config = true;
+    }
+    if (const auto* trace_section = root.if_contains("trace"))
+        Require(trace_section->is_object(), "trace must be an object");
+    if (const auto* answers_section = root.if_contains("answers")) {
+        const auto& answers = Object(*answers_section, {"file", "method"}, {});
+        Require(Text(answers.at("method")) == "exact_scan_float64",
+                "Unsupported independent answer method");
+        Text(answers.at("file"));
+        config.complete_evaluation_config = config.complete_evaluation_config &&
+            root.if_contains("trace") != nullptr;
+    }
+
+    // effective-config.json must keep the authored run-relative paths: EVAL-1.1
+    // forbids absolute paths and "..", and the published artifact is validated
+    // against the run directory it lands in. Resolution happens only for the
+    // internal handles below.
     config.effective = root;
     const auto base = std::filesystem::absolute(path).parent_path();
     auto resolve = [&](const json::value& value) {
@@ -292,9 +377,15 @@ Config ReadConfig(const std::filesystem::path& path) {
         return Utf8(std::filesystem::absolute(base /
             std::filesystem::path(encoded)).lexically_normal());
     };
-    for (auto name : {"vectors", "ids", "queries", "query_ids"})
-        config.effective.at("dataset").as_object().at(name) = resolve(dataset.at(name));
-    config.effective.at("engine").as_object().at("directory") = resolve(engine.at("directory"));
+    auto to_path = [](const std::string& text) {
+        return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text.data()),
+                                                   text.size()));
+    };
+    config.directory = to_path(resolve(engine.at("directory")));
+    config.vectors = to_path(resolve(dataset.at("vectors")));
+    config.ids = to_path(resolve(dataset.at("ids")));
+    config.queries = to_path(resolve(dataset.at("queries")));
+    config.query_ids = to_path(resolve(dataset.at("query_ids")));
     return config;
 }
 

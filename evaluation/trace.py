@@ -97,14 +97,20 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# Artifacts are hashed as raw bytes, so they must not follow the platform
+# newline convention; a fixture generated on Windows has to hash the same as
+# one generated on Linux.
+def write_text(path, text):
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def dump(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n",
-                    encoding="utf-8")
+    write_text(path, json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def dump_rows(path, rows):
-    path.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
-                            for row in rows), encoding="utf-8")
+    write_text(path, "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+                             for row in rows))
 
 
 def build_timeline(rng, base_count, write_count, query_count):

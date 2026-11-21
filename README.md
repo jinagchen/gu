@@ -8,7 +8,7 @@
 | 赛题编号 | proj47 |
 | 赛题名称 | 面向 Agent 记忆的向量检索系统 I/O 优化 |
 
-技术路线为 C++20 核心加 Python 评测。本机使用原生 Windows，异步后端设计采用 IOCP。截至 2026 年 11 月 20 日，阶段二本机工程可行性和阶段三设计验收已通过，DESIGN-1.1 已冻结。阶段四已交付同步存储和静态 C++ 并发基准，当前待接入真实静态 Engine 并完成独立召回与资源评测。
+技术路线为 C++20 核心加 Python 评测。2026 年 11 月 10 日用户确定使用本机原生 Windows 开发、运行和评测；当前设计为 DESIGN-1.1，异步后端采用 IOCP。阶段二工程可行性验收已通过：DiskANN 固定提交及补丁、小数据构建/加载/查询、读接口替换、隔离依赖、数据卷及资源计量均有实测；阶段三设计验收亦已通过，DESIGN-1.1 已冻结。2026 年 11 月 21 日 B 侧补齐真实索引适配、首次构建、Engine 静态查询与评测闭环，第四阶段静态基线已可运行；动态运行与正式性能实验仍未实现。
 
 华北区域赛初赛作品提交日为 **2026 年 12 月 11 日**，希冀赛题窗口截至当日 **23:59**。初赛材料包含现阶段源代码和设计实现文档。队伍最终提交流程、正式数据与内存计量口径继续跟进。[赛程来源和待确认事项](docs/open-questions.md)
 
@@ -44,8 +44,10 @@ Copyright 2026 proj47-RecallFlow contributors.
 - [第三阶段 A 交付](docs/stage3-a-completion.md)：API-1.2 读取/资源/WAL 声明、预算切换及 EVAL-1.1 基准输出与自检。
 - [第三阶段 B 交付](docs/stage3-b-completion.md)：索引/增量内部契约、首次构建与动态运行配置、轨迹与独立答案的生成和校验。
 - [第三阶段联合复核与冻结](docs/stage3-freeze.md)：2026 年 11 月 17 日关闭五处交接，冻结 DESIGN-1.1、STORAGE-A-1.1 与 INDEX-B-1.2，第三阶段设计验收通过。
+- [第四阶段 A 交付](docs/stage4-a-storage.md)：同步存储与并发基准生产端。
+- [第四阶段 B 交付](docs/stage4-b-completion.md)：真实索引适配、首次构建、静态 Engine、真实基准目标与评测闭环；含静态基线结果、重复运行对比与已知限制。
 
-公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 与索引层仍只有声明，同步存储已有独立实现，尚不能链接成完整引擎。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
+公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 已按声明实现静态查询路径并能链接，写路径返回 `unsupported`；同步存储已有独立实现。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
 2026 年 11 月 12 日开始第四阶段 A：已新增可链接的 `agent_io_storage` 静态库，实现同步读取、文件/缓冲租约、预算预约和关闭缓存/预取的批读取，并接入现有 DiskANN 小数据探针。两次独立精确答案检查 Recall@10 均为 1.0，范围和命令见[同步存储交接记录](docs/stage4-a-storage.md)。
 
@@ -75,17 +77,18 @@ Copyright 2026 proj47-RecallFlow contributors.
 
 ## 计划目录
 
-以下为目标结构。CMake 已可构建存储与基准库、相应测试、接口检查、Windows 环境探针、Job Object 启动器及可选 DiskANN 读取适配探针。已有固定 Boost 头文件时还构建 vector_bench；真实引擎与首次构建尚未完成，Python 评测入口已可用。
+以下为目标结构。CMake 已可构建存储、索引、引擎与基准库、相应测试、接口检查、Windows 环境探针、Job Object 启动器和首次构建命令。已有固定 Boost 头文件时还构建 vector_bench；Python 评测入口已可用。`src/cache/`、`src/update/` 仍是目标位置，尚未实现。
 
 ```text
 CMakeLists.txt
 include/agent_io/     核心公开接口
 src/storage/          同步读写、块格式和后续 Windows IOCP 后端
+src/index/            FORMAT-1 编解码、清单、首建与图适配
+src/engine/           静态查询引擎（写路径返回 unsupported）
 src/benchmark/        静态开放式并发基准运行器
-src/cache/            固定容量缓存、准入和在途读取去重
-src/index/            检索与增量索引适配
-src/update/           WAL、版本信息和后台合并
-tools/                环境探针、接口检查、基准 CLI 与生产端集成检查
+src/cache/            固定容量缓存、准入和在途读取去重（未实现）
+src/update/           WAL、版本信息和后台合并（未实现）
+tools/                环境探针、基准与首建 CLI、契约自检与基线驱动
 tests/                核心正确性、恢复和并发测试
 evaluation/           Python 数据处理、实验编排和结果分析
 configs/              可复现实验配置
@@ -117,7 +120,7 @@ cmake --build build/windows --config Release
 ctest --test-dir build/windows -C Release -V
 ```
 
-当前命令构建同步存储及并发基准，验证存储、基准、环境与内存探针，不会产生完整 Engine。普通终端若无法找到 cmake，使用[环境记录中的随附工具路径](docs/environment-validation.md)。CLI 的协议验证命令见[基准交付记录](docs/stage4-a-benchmark.md)。
+当前命令构建同步存储、索引、静态 Engine 与并发基准，验证存储、索引协议、引擎召回、环境与内存探针。首建 CLI 与基线驱动见[第四阶段 B 交付](docs/stage4-b-completion.md)，基准生产端见[第四阶段 A 交付](docs/stage4-a-benchmark.md)。普通终端若无法找到 cmake，使用[环境记录中的随附工具路径](docs/environment-validation.md)。
 
 Python 侧校验命令（使用 `.venv` 中的解释器）：
 
@@ -125,9 +128,11 @@ Python 侧校验命令（使用 `.venv` 中的解释器）：
 python tools/contracts/check-stage3-b.py
 python tools/contracts/test-stage3-b.py
 python -m evaluation.check --run evaluation/examples/stage3-b
+python tools/contracts/check-build.py --output build/build-contract
+python tools/contracts/run-static-baseline.py --run-id stage4-static-001
 ```
 
-前两条检查配置、30 个原有反例和动态回归场景；最后一条校验运行目录并计算 Recall@10，结果写入该目录的 evaluation.json。退出 1 为工件无效，退出 2 为 incomplete/requires_review、不计召回；退出 0 仅表示完整工件已计分。DESIGN-1.1 已按[冻结记录](docs/stage3-freeze.md)完成复核；新增清单 schema 检查运行 `python tools/contracts/test-stage3-freeze.py`，不替代真实 Engine 验收。
+前两条检查配置、30 个原有反例和动态回归场景。`evaluation.check` 校验运行目录并计算 Recall@10，结果写入该目录的 evaluation.json；退出 1 为工件无效，退出 2 为 incomplete/requires_review、不计召回；退出 0 仅表示完整工件已计分。`check-build.py` 走首建拒绝矩阵并独立重算已发布索引的哈希。`run-static-baseline.py` 在 Job 限额内跑完夹具、首建、测量与校验。DESIGN-1.1 已按[冻结记录](docs/stage3-freeze.md)完成复核；新增清单 schema 检查运行 `python tools/contracts/test-stage3-freeze.py`。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
 

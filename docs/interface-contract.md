@@ -39,7 +39,7 @@ write_effect 默认 none。只有写入可能进入 WAL 后的不可确定错误
 | Stats() | Result<EngineStats> | 有界计量快照；多计数非原子一致，不能代替查询视图 |
 | Close() | Result<Success> | 停新请求、排空、报告错误；重复成功关闭幂等 |
 
-索引首次创建由独立构建程序负责：输入、第三方参数、独立 Job 限额与 staging 发布规则见 [B 侧契约](stage3-b-contract.md) 与 [build-run.json](../configs/examples/build-run.json)，构建程序本身尚未实现。A 已规定构建受限域、文件发布和资源交接要求，见 [A 侧契约](stage3-a-contract.md)。没有 `flush` 歧义：写入同步由 Insert/Upsert 保证，Checkpoint 专指数据段与清单覆盖。没有删除、事务组和历史 Search API。
+索引首次创建由独立构建程序负责：输入、第三方参数、独立 Job 限额与 staging 发布规则见 [B 侧契约](stage3-b-contract.md) 与 [build-run.json](../configs/examples/build-run.json)，构建程序 `vector_build` 已于 2026 年 11 月 21 日实现，拒绝矩阵与已发布索引的独立复核见[第四阶段 B 交付](stage4-b-completion.md)。A 已规定构建受限域、文件发布和资源交接要求，见 [A 侧契约](stage3-a-contract.md)。没有 `flush` 歧义：写入同步由 Insert/Upsert 保证，Checkpoint 专指数据段与清单覆盖。没有删除、事务组和历史 Search API。
 
 Get 返回的 `version` 是该向量最后修改序号，`snapshot_sequence` 是操作读取的整体快照，两者不必相同。Search 的每个版本不得大于 S，且不得存在同一 ID 的更高可见版本。
 
@@ -107,7 +107,7 @@ BufferLease 的可写入口只供后端或填充者使用，缓存发布后只�
 
 ## 6 契约演进
 
-2026 年 11 月 17 日冻结组合：API-1.2 / STORAGE-A-1.1 / INDEX-B-1.2 / FORMAT-1 / EVAL-1.1，对应 DESIGN-1.1。清单此前未实现，本次首次固定完整 JSON schema；公开 API 与运行输出字段未变。
+2026 年 11 月 17 日冻结组合：API-1.2 / STORAGE-A-1.1 / INDEX-B-1.2 / FORMAT-1 / EVAL-1.1，对应 DESIGN-1.1。清单此前未实现，本次首次固定完整 JSON schema；公开 API 与运行输出字段未变。2026 年 11 月 21 日 FORMAT-1 编解码、首建发布与静态 Engine 已按该冻结实现，公开声明未改。
 
 公开类型或语义改变时修改 API 版本并更新头文件、文档、基准与调用示例。单纯新增计数不改变已存在字段含义。阶段二若证实依赖无法走该读接口，先记录决策并修改契约，不在实现中绕过后仍声称符合设计。
 

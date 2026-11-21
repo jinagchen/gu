@@ -1,6 +1,6 @@
 # C++ 基准与 Python 评测协议
 
-协议版本 EVAL-1.1，日期 2026 年 11 月 11 日。对应 DESIGN-1.1、API-1.2 与 REQ-1.0，当前执行平台为本机 Windows。2026 年 11 月 15 日已实现 A 的静态基准 CLI 和运行器，当前显式合成目标仅用于生产端验证，真实 Engine 目标尚未链接，见[交付记录](stage4-a-benchmark.md)。A 生产端的字段、守恒、错误和有界输出约束见 [基准输出字段契约](benchmark-output-contract.md)；2026 年 11 月 16 日 B 补齐构建配置、动态输入轨迹、独立答案与 `evaluation.check`，见 [B 侧契约](stage3-b-contract.md)。
+协议版本 EVAL-1.1，日期 2026 年 11 月 11 日。对应 DESIGN-1.1、API-1.2 与 REQ-1.0，当前执行平台为本机 Windows。2026 年 11 月 15 日已实现 A 的静态基准 CLI 和运行器，显式合成目标用于生产端验证，见[交付记录](stage4-a-benchmark.md)；2026 年 11 月 21 日 B 接通真实 Engine 目标并跑通静态基线闭环，见[第四阶段 B 交付](stage4-b-completion.md)。A 生产端的字段、守恒、错误和有界输出约束见 [基准输出字段契约](benchmark-output-contract.md)；2026 年 11 月 16 日 B 补齐构建配置、动态输入轨迹、独立答案与 `evaluation.check`，见 [B 侧契约](stage3-b-contract.md)。
 
 原协议示例是用于检查字段与逻辑的手工合成数据，不是测得的吞吐、召回或延迟。新增 vector_bench 的 contract-test 会生成实际计时的合成调用记录，仍不作为磁盘检索或正式性能实验。
 
@@ -14,7 +14,7 @@ vector_bench --config <run.json> --output <new-run-directory>
 python -m evaluation.check --run <run-directory>
 ```
 
-vector_bench 已有静态生产端入口；默认 Engine 目标返回 3，测试需显式 --target contract-test。`evaluation.check` 已实现，可对运行目录做协议校验并计算召回；`vector_build` 的配置与首建契约已给出，但构建程序仍未实现，真实目标的构建配置也待接入。A 已规定构建受限域、发布与资源交接要求，见 [A 侧契约](stage3-a-contract.md)。输出目录必须是新目录，已有结果不默认覆盖。
+vector_bench 的 `--target engine` 已链接真实引擎并产出 measured 工件；`--target contract-test` 仍保留为生产端自检，且拒绝 measurement。`evaluation.check` 可对运行目录做协议校验并计算召回；`vector_build` 已实现首建与发布，配置不完整退出 2，数据或环境不符退出 4。A 规定的构建受限域、发布与资源交接要求见 [A 侧契约](stage3-a-contract.md)。输出目录必须是新目录，已有结果不默认覆盖；被拒绝的运行不留下空目录。
 
 基准程序退出码约定：0 表示请求执行完成并写出完整协议工件，2 为配置错误，3 为环境或依赖不支持，4 为运行错误，5 为工件不完整。退出 0 不代表 Recall 达标，召回与资源验收由 Python 检查给结论；有失败请求时结果必须显式标记。
 
@@ -22,7 +22,7 @@ vector_bench 已有静态生产端入口；默认 Engine 目标返回 3，测试
 
 [静态配置示例](../configs/examples/static-run.json) 中的 memory 是引擎内部预算。正式内存约束仍须由外部受限域覆盖 C++、后台工作与日志缓冲，并保存计量范围和峰值；该 JSON 不能替代真实限制。
 
-示例使用 10 条二维向量和 256 MiB 内部预算，仅演示字段，不是超内存工作集实验，也不满足任何已测的内存比例结论。数据文件尚未生成，示例不能直接作为正式运行配置。
+示例使用 10 条二维向量和 256 MiB 内部预算，仅演示字段，不是超内存工作集实验，也不满足任何已测的内存比例结论。可直接运行的静态配置由 `evaluation/static_fixture.py` 按参数生成，不手工维护。
 
 数据采用首版自有 raw-f32le-v1：向量文件为无头行优先 float32 小端，条数和维度显式给出；ID 文件为对应行的 uint64 小端，查询 ID 单独给出。大小必须精确匹配，ID 唯一、数值有限；SIFT 等原格式由 Python 转换并保存原始与转换后校验值。
 
