@@ -1,6 +1,6 @@
 # 第三阶段 A 侧存储与基准契约
 
-日期：2026 年 11 月 11 日。版本 STORAGE-A-1，对应 API-1.2、EVAL-1.1 和现有 DESIGN-1.1；FORMAT-1 字节布局保持不变。本文件定义 A 的交付，供 B 对接。新增 C++ 类型都是声明，尚无正式缓存、IOCP 后端、WAL 编解码或基准程序实现。
+日期：2026 年 11 月 17 日冻结修订，版本 STORAGE-A-1.1，对应 API-1.2、EVAL-1.1 和 DESIGN-1.1；FORMAT-1 的 WAL 字节布局保持不变。本文件定义 A 的交付，供 B 对接。同步存储与静态基准已有第四阶段实现，缓存、IOCP 后端与 WAL 编解码仍待实现；交接关闭情况见[冻结记录](stage3-freeze.md)。
 
 ## 1 范围与交接
 
@@ -41,7 +41,7 @@ TryPrefetch 不等待容量。合法请求返回 admitted（新在途）、alrea
 
 ### 2.2 延迟回收
 
-B 仅在新清单持久发布且恢复协议允许回收后调用 Retire(file_id)。A 标记退休、从缓存和注册表移除强驻留引用、禁止其重新入缓存；已有 FileLease/BlockLease/在途读继续可用。重复 Retire 同一已知 ID 幂等，未知 ID 返回 not_found。
+B 仅在新清单持久发布、旧发布者与所有旧 ReadViewLease 已释放且恢复协议允许回收后，锁外调用 Retire(file_id)。视图计数归零由 B 确认；此时独立 BlockLease/在途读仍可能持有文件。A 标记退休、从缓存和注册表移除强驻留引用、禁止其重新入缓存；已有 FileLease/BlockLease/在途读继续可用。重复 Retire 同一已知 ID 幂等，未知 ID 返回 not_found。
 
 退休文件在本进程结束前不得再次 Open；新代次使用新路径、新身份。CollectRetired 是非阻塞回收尝试：仍有外部引用时保留待回收条目并成功返回；全部引用释放后才关闭句柄并删除文件。删除失败返回带系统错误的 io_error，保留待回收记录与磁盘计量以供重试。FileRegistry 必须活到这些租约结束，不因 Engine 对象先销毁而提前删文件。
 
@@ -79,6 +79,8 @@ query -> preparing -> rebuild -> releasing -> query
 3. 新旧 PQ 同时驻留也必须预约 metadata。最多一个维护任务；构建子进程纳入同一个 Job，不能只记 IPC 缓冲而遗漏其实际内存。无法有界预约第三方分配时拒绝任务并报告 unsupported。
 4. B 完成清单/视图切换后释放构建工作区；旧代次仍固定的内存、文件和增量继续收费。TrySwitchMode(query) 只有各占用已装入 query 上限时才成功，失败时保持 rebuild 并对新任务背压。
 5. 失败回退同样等已接管 I/O 和构建进程退出后释放资源，staging 残留计磁盘占用，不报告发布成功。
+
+首次离线构建独立运行，使用 build-run.json 的独立 Job 限额；在线维护子进程必须加入引擎所在的同一受限 Job，不能新建平行计量域而遗漏其占用。若叠加更小的嵌套限额，它也必须仍受父 Job 总额限制。在线子进程实际内存同时由父 Job 约束与后台 workspace 预约覆盖，不与进程内构建工作区重复预约同一分配；IPC 等额外分配另计。受限关系必须在挂起创建后、恢复线程前建立，加入失败即终止任务且不执行构建；只设置 workspace 数字不等于完成 Job 归属。阶段二 job_process_tree 仅证明启动器的进程树机制，真实在线维护集成留实现验证。
 
 ResourceLimits 及 ReadScheduling 对应 [engine.hpp](../include/agent_io/engine.hpp)：
 
@@ -142,7 +144,7 @@ BenchmarkLimits 初值 workers=1、client_queue_capacity=128、client_queue_byte
 | 输入与交错 | A 的处理与资源释放 | B 的处理与结果 |
 | --- | --- | --- |
 | Q1 固定 S=7、文件 F1，随后 id=42 更新到 8 | Q1 的 F1 与块租约保留；不通过可变缓存条目覆盖旧字节 | Q1 只用≤7 的版本；写入 8 同步且发布后，新 Q2 可以看到 8 |
-| 合并切点 C=10，新图 F2 发布时 Q1 仍固定 F1 | Retire(F1) 只排退休；旧读与在途继续；所有租约释放后 CollectRetired 才删除；两代资源都收费 | B 发布时拼回>10 的尾部，清单及恢复安全得到证实前不请求删除 |
+| 合并切点 C=10，新图 F2 发布时 Q1 仍固定 F1 | F1 与两代资源继续计费；收到 Retire 后只排退休，独立块/在途引用释放后 CollectRetired 才删除 | B 发布时拼回>10 的尾部，等旧发布者/Q1 视图释放且清单及恢复安全成立后，锁外请求 Retire |
 | sequence=11 的 WAL 只写入半帧后进程退出 | Append 无法成功完成，不能被视为已同步；重启解码最新 EOF 返回 need_more | B 丢弃未完成尾，不确认 11；完整帧 CRC 错误则 Open 失败 |
 | Q1/Q2 共享 F1 的同一块，Q1 超时，随后 IOCP 读失败 | Q1 脱离，缓冲与槽仍保留；失败传给 Q2；回调结束后归还；不缓存半块 | Q1 记录 deadline_exceeded，Q2 记录 io_error；均失败计数，结果不补旧版本 |
 | 切 rebuild 时旧查询固定缓存 120 MB，目标 cache 100663296 | TrySwitchMode 返回 resource_exhausted，mode 仍 query，不能暂借 reserve | B 等引用释放或让维护准入失败；不启动第三方全量构建 |

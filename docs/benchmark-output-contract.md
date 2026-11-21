@@ -2,7 +2,7 @@
 
 日期：2026 年 11 月 11 日，协议 EVAL-1.1，A 生产端交付。schema_version 保持 1，新增 protocol_version="EVAL-1.1" 区分字段修订，旧 EVAL-1 示例一并升级。本文件与 [评测协议](evaluation-protocol.md)、[A 侧契约](stage3-a-contract.md)共同使用。
 
-所有示例均为 purpose="contract_example" 的手工协议样例，不对应真实向量文件或运行结果。B 已于 2026 年 11 月 16 日交付动态输入轨迹、精确答案生成端和 evaluation.json 消费端（见 [B 侧交付记录](stage3-b-completion.md)），其样例同样标为 contract_example，不构成真实运行结论。
+A 侧示例均为 purpose="contract_example" 的手工协议样例，不对应真实向量文件或运行结果。B 已于 2026 年 11 月 16 日交付动态输入轨迹、精确答案生成端和 evaluation.json 消费端（见 [B 侧交付记录](stage3-b-completion.md)），其样例有小型真实输入文件，但结果由精确参考生成，同样标为 contract_example，不构成引擎运行结论。
 
 ## 1 类型规则
 
@@ -103,6 +103,8 @@ engine_counters 恰有 io_reads_submitted、io_read_bytes_completed、io_read_er
 - io_read_errors：后端提交失败或完成失败各请求至多一次，短读计错误；错误读取的实际完成字节仍可加入 io_read_bytes_completed，但数据不发布。
 - WAL/checkpoint/merge：各自实际完成的逻辑文件写字节，包含头和填充，重试造成的实际重复写也计；不包含设备 NAND 的内部写。
 
+2026 年 11 月 17 日冻结对齐：INDEX-B-1.2 的 logical_blocks_read/logical_bytes_read、prefetch_admitted/prefetched_keys_used 是单次 Expand 逻辑诊断，包含命中与共享读取的行为，不能当作上述 engine_counters 或用查询之和替代全局消费。预取首次被需求合入后即使随后读取失败也不撤销 consumed；同键被淘汰后再新建预取才开始下一驻留周期。生产端字段保持 EVAL-1.1 不变。
+
 查询 window_completed_qps 使用 by_type.query.window_succeeded / 窗口秒数；drained_qps 使用 succeeded / ((duration_ns+drain_ns)/10⁹)。写入分别对 insert/upsert 报同样口径。失败、拒绝单列，不混入成功吞吐。
 
 完整且无不可确定写入时，成功写入序号集合必须恰覆盖 (measurement_start_sequence, measurement_end_sequence]，检查按序号排序后的集合，不能要求日志响应顺序递增。查询 S 必须在这两个序号之间。出现不可确定写入、并行外部写入或写入记录缺失时禁止给出动态正确性通过；本协议只允许基准进程控制全部写调用。
@@ -126,4 +128,4 @@ environment.json 须记录 job_limit_commit_bytes、sample_interval_ms、测量�
 .\.venv\Scripts\python.exe tools/contracts/test-stage3-a.py
 ```
 
-校验器检查本次固定配置及示例的类型、字段、顺序、守恒、序号关联和模式预算；负例检查协议矛盾会被拒绝。它是生产端契约自检，不是正式测量入口，也不实现独立向量答案、动态轨迹生成或 B 的 evaluation.check。正式运行中的文件哈希和实际向量内容仍须 B 实现消费端验证。
+校验器检查本次固定配置及示例的类型、字段、顺序、守恒、序号关联和模式预算；负例检查协议矛盾会被拒绝。它是生产端契约自检，不是正式测量入口，也不实现独立向量答案、动态轨迹生成或 B 的 evaluation.check。文件哈希和向量内容由已交付的 B 消费端独立验证，真实 Engine 测量仍待后续集成。

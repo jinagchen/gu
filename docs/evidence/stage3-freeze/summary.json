@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-17",
+  "timezone": "Asia/Shanghai",
+  "baseline_head": "47e99f1b8e1c901b7bba50b36652e2494663a0c2",
+  "includes_uncommitted_changes": true,
+  "design": "DESIGN-1.1",
+  "storage_contract": "STORAGE-A-1.1",
+  "index_contract": "INDEX-B-1.2",
+  "review_executor": "Codex, user-authorized cross-module review; no individual team member signatures",
+  "scope": "stage-three design exit, not Engine implementation or performance acceptance",
+  "checks": {
+    "release_build": "passed",
+    "debug_build": "passed",
+    "release_ctest": {
+      "total": 9,
+      "passed": 9
+    },
+    "debug_ctest": {
+      "total": 9,
+      "passed": 9
+    },
+    "stage3_a_contract": "passed",
+    "stage3_a_regressions": 23,
+    "stage3_b_contract_negative_cases": 30,
+    "stage3_b_regressions": 87,
+    "manifest_schema_tests": 22,
+    "local_markdown_links_checked": 232,
+    "git_diff_check": "passed"
+  },
+  "build_warnings": [
+    "MSB8028 in the existing Release build directory; build completed successfully"
+  ],
+  "sha256": {
+    "CMakeLists.txt": "dc22c15b93a2d455ec9fcd319b2b3d42aa96bb5aa92c1a31279102c6fdedccb7",
+    "include/agent_io/index.hpp": "a960ff705ce18dc91e10be3e35db015c08b76719b5a6cce972c18d527fe53879",
+    "include/agent_io/storage.hpp": "b477e6653f0d62926fe2fc3550d8067a6f6a0a847fe7d02c11260cf36de92a15",
+    "include/agent_io/engine.hpp": "069e7d6a8ab20e4d0874630dcb8b7a8ed7b49649eb0ea3d90d8f93ac8331e3b6",
+    "tools/contracts/header-smoke-b.cpp": "4abe8aa3f3b0f61253c9ce893ec678e864d204cab1ece0a6f3cf07bd6cd70d87",
+    "tools/contracts/check-stage3-a.py": "ec2d2f0b0c989ac1b489dee4750a387d78cee47b8efc007ed4ff94ff9340cfd7",
+    "tools/contracts/test-stage3-a.py": "c29d10316b2c2f1733a4ea7aeb0b2745a072dd88f25f0b158697cec37f95e30f",
+    "tools/contracts/check-stage3-b.py": "dea970dbbb2a0a2b0fce1309c653788ff2c70ba653d32d475e1361b2424d497b",
+    "tools/contracts/test-stage3-b.py": "11658a00cf446a77859fc769c3c97da15ec77014b01aede020d3ca4e33346365",
+    "tools/contracts/test-stage3-freeze.py": "e27fe28fa082c5f9e2e031e984640136630260d517203241847898579234e9de",
+    "evaluation/check.py": "978067bf125de1b479e299bb4a8d71834381c358ddaf6151d81ae01c723fffcd",
+    "configs/examples/manifest.json": "fe02f39ec74d6ee27c062f077703958f10f112fc67fe3f50825651f9ba646b5e",
+    "docs/stage3-freeze.md": "829c41b1b1546f1a4716c8211c6e162347a82013f648852fe77d90786a1517bb",
+    "docs/stage3-a-contract.md": "39306ef2125c918da69d1f3ef5385836af76f2797cf8cb677b1861cbd372177b",
+    "docs/stage3-b-contract.md": "2d038fca56ae6e5f56e2feda8077a1f674d9f52102a6e91ee95d9aa1ef123980",
+    "docs/storage-protocol.md": "9a034e833c8d3b27ff39940c884220234939794f7dbb89829a9fe8a2c3697027",
+    "docs/evidence/stage3-freeze/ctest-Release.log": "f0e34b8a134447907ad1a8a1f74f1dac090850964e4bf78b6fa39ad72ff45775",
+    "docs/evidence/stage3-freeze/ctest-Debug.log": "fbce63fd8b83bb1a824922c7cd51c0eaa5da31d3c5512c6f9c677fe8230f100e"
+  }
+}

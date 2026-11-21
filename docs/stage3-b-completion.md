@@ -1,6 +1,10 @@
 # 第三阶段 B 交付记录
 
-日期：2026 年 11 月 16 日。版本 INDEX-B-1，对应 API-1.2、EVAL-1.1、STORAGE-A-1。本次交付 B 侧内部契约、首次构建与动态运行配置、动态轨迹与独立答案的生成/校验代码，以及一组自洽样例。**索引层本身仍未实现**：`index.hpp` 全是声明，没有 IndexAdapter、DeltaStore、构建或合并代码。
+日期：2026 年 11 月 17 日。初次复审版本 INDEX-B-1.1，对应 API-1.2、EVAL-1.1、STORAGE-A-1。11 月 16 日首次交付 B 侧内部契约与动态评测；本次修复复核发现的语义、校验和接口缺口。**索引层本身仍未实现**：`index.hpp` 全是声明，没有 IndexAdapter、DeltaStore、构建或合并代码。
+
+2026 年 11 月 21 日补记：上述"未实现"描述的是文件成文时的状态。索引适配、首次构建与静态 Engine 已在第四阶段落地，见[第四阶段 B 交付](stage4-b-completion.md)；DeltaStore、WAL 重放、后台合并与写路径仍未实现。
+
+同日冻结更新：按用户指示完成 A/B 交接复核，当前 INDEX-B-1.2 补齐 Manifest 字段及逻辑读取/预取诊断，STORAGE-A-1.1 固定回收与 Job 边界；DESIGN-1.1 已冻结，第三阶段设计退出通过。详见[联合复核记录](stage3-freeze.md)。下文第 1 至 6 节保留先前修复时点的验证与 Git 状态，不代表当前提交状态；第 7 节列出五处交接的关闭依据。
 
 ## 1 交付物
 
@@ -14,16 +18,20 @@
 | [evaluation/check.py](../evaluation/check.py) | 消费运行目录：类型、守恒、时钟、版本、距离重算、序号连续性、**轨迹与工件关联**、`query_count` 与轨迹哈希、召回率；写出 evaluation.json |
 | [evaluation/examples/stage3-b/](../evaluation/examples/stage3-b) | 24 条 4 维、10 次写、6 次查询、3 个快照的自洽样例及数据文件 |
 | [tools/contracts/header-smoke-b.cpp](../tools/contracts/header-smoke-b.cpp) | 编译期类型与成员断言，注册为 `agent_io_index_contracts` 目标 |
-| [tools/contracts/check-stage3-b.py](../tools/contracts/check-stage3-b.py) | 配置规则、轨迹顺序、精确答案一致性检查，外加 15 个反例 |
+| [tools/contracts/check-stage3-b.py](../tools/contracts/check-stage3-b.py) | 配置规则、轨迹顺序、精确答案一致性检查，30 个原有反例 |
+| [tools/contracts/test-stage3-b.py](../tools/contracts/test-stage3-b.py) | 87 项动态回归（复审先新增 24 项，继续复核再新增 9 项），注册到 CTest |
 
 ## 2 验证结果
 
-构建与测试（Windows 原生，MSVC 19.44，`/W4 /WX`）：
+2026 年 11 月 17 日本机复审：Windows 原生，MSVC 19.43.34810.0，`/W4 /WX /permissive- /EHsc`。先前 54 项 B 回归已重跑通过，复审增至 78 项，继续复核增至 87 项。此前 MSVC 19.44 / 5 项 CTest 为 11 月 16 日的历史记录；本次使用修复工作树现有 Visual Studio 2022 x64 构建配置，结果如下（当前 shell 未将 CMake 加入 PATH，使用 VS 随附可执行文件的绝对路径）：
 
 ```text
-cmake -S . -B build\windows -G "Visual Studio 17 2022" -A x64   -> done
 cmake --build build\windows --config Release                     -> 全目标成功
-ctest --test-dir build\windows -C Release                        -> 5/5 passed
+cmake --build build\windows --config Debug                       -> 全目标成功
+ctest --test-dir build\windows -C Release                        -> 8/8 passed
+ctest --test-dir build\windows -C Debug                          -> 8/8 passed
+python tools/contracts/test-stage3-b.py                         -> 87/87 passed
+python tools/contracts/test-stage3-a.py                         -> 23/23 passed
 ```
 
 B 侧契约自查：
@@ -39,6 +47,8 @@ A 侧无回归：
 python tools/contracts/check-stage3-a.py
 PASS: static config, resource modes, static answer join, normal/uncertain outputs
 ```
+
+生成端往返复核：在独立新目录运行 evaluation.trace，再运行 evaluation.check；除重新计算的 evaluation.json 外，全部生成文件与仓库夹具 SHA256 一致，快照仍为 S=5、8、10。临时正式测量格式的正例也仅是测试生成的证据，不代表实际执行了正式测量。
 
 样例自身的评测结果（`evaluation/examples/stage3-b/evaluation.json`）：6 次查询全部 ok，3 个快照（S=5、8、10），已确认写入 10 条，距离重算最大绝对误差 0，Recall@10 = 1.0。
 
@@ -62,7 +72,53 @@ PASS: static config, resource modes, static answer join, normal/uncertain output
 | 写入比例 | 0.6 / 0.25 / 0.15 | 0.375 / 0.25 / 0.375 | 轨迹实为 6 查 4 插 6 更新，与声明不符；轨迹驱动模式下按比例重抽样会得到另一套答案 |
 | `run_id` | `dynamic-contract-001` | `stage3-b-exact` | 配置与轨迹行的 run_id 不一致，工件无法关联 |
 
-修正的同时把三条规则写进[契约第 10 节](stage3-b-contract.md)并补了对应反例，否则下次还会犯同样的错。第 10 节还明确了 `trace.operations` 的语义（写操作条数，不含查询）、到达序号稠密性、写序号连续性，以及"轨迹驱动不重新抽样"的约束。
+以上为 11 月 16 日的修正记录。当前[契约第 10 节](stage3-b-contract.md)规定 trace.operations 只计写请求，到达序号稠密，固定轨迹不重新抽样；实际成功序号来自收据，不再由输入轨迹预测。
+
+### 4.1 11 月 17 日复核修复
+
+| 发现 | 修复及证据 |
+| --- | --- |
+| 输入到达数被误当成提交前缀 | 删除轨迹的 sequence/committed_prefix_at_arrival；按真实收据和查询 S 重建答案，合法并发、失败、拒绝均有回归 |
+| 跨运行结果、重复操作及载荷错配可通过 | 检查运行身份、跨类型 operation_id 唯一、一一关联和完整输入定位 |
+| DeltaStore 缺全局版本与捕获边界 | WriteSlot 显式传 sequence；新增 CapturePin，SlotRecord/SlotValues 携带 DeltaPin |
+| 工作区公式缺参数 | ScratchRequest 显式提供段数、候选预算、复制块数、PQ 上界；本次复审进一步让 Locate 携带 ReadViewLease，加入导航上界及精排预算 |
+| 窗口计数与测量序号漏检 | 逐行重算窗口计数并检查完整成功序号区间；pending 与轨迹缺失记录按类型对应 |
+| upsert 新 ID 被拒、短成功结果被接受 | upsert 允许插入，成功邻居数必须等于 min(K,live_count) |
+| 非零起点没有版本来源 | baseline 显式登记测量起点、逐行版本文件和哈希；预热不混入测量日志 |
+| 输入与环境证据不完整 | 核对全部数据哈希、query.ids.u64 映射、载荷登记、答案和 environment；正式测量检查附加证据字段 |
+| incomplete/requires_review 仍显示 pass | 保留标志、不计分、退出 2；无效工件覆盖旧 evaluation.json 并退出 1 |
+
+仓库内轨迹、写入记录及有效配置已由生成器同步更新。INDEX-B-1 的输入轨迹不向后兼容，重新生成后使用；公开 API-1.2 与查询/写入输出字段不变。新增回归既检查应拒绝的损坏输入，也检查合法并发、失败、重复查询 ID 和非零起点应通过，避免靠过度拒绝掩盖问题。
+
+### 4.2 本次复审发现与修复
+
+按严重程度排列；下述修改仍未提交：
+
+| 级别 | 发现 | 修复与验证边界 |
+| --- | --- | --- |
+| P1 | 写→写收据倒序、查→查快照回退及不可确定错误后继续成功写仍可能被接受 | 对全部成功操作检查严格时钟先后与发布前缀，已知不可确定序号不可跨越；新增非法次序反例与合法重叠/相等刻度对照。仅为离线检查，不是并发实现验收 |
+| P1 | 普通 ReadView/DeltaPin 拷贝不固定资源，且预留后失败可能留下阻断发布的槽洞 | 新增 ReadViewLease/ReadViewLifetime 所有权声明；CancelLastSlot 仅撤销 WAL 前的未发布尾槽；冻结只能发生在组边界。原生头文件断言通过，具体实现与压力测试仍待后续 |
+| P1 | 精排没有预算/期限入口，候选重叠存活与导航开销未能明确计入工作区 | RefinementRequest 携带租约、预算及期限，Expand 显式接收 K；候选两份重叠数组、navigation_scratch_bytes 与共享 workspace 一并计量，消除输入预算和计划结果的循环定义 |
+| P1 | 正式测量可用空 Job JSON 冒充证据，资源采样未被消费 | 核对 Job schema/限额/峰值/退出状态与采样身份、时钟、资源类型及预算外披露；新增正反例。只验证文件内部一致性，不能认证证据来源或证明内存比例达标 |
+| P2 | 不完整轮次跳过邻居类型校验；跨请求类型的记录可伪装 pending；多余答案与可选配置被忽略 | 结构检查移到未评分返回之前，强制请求类型关联和答案集合约束，校验 workload/measurement/snapshot_policy；新增定向反例 |
+| P2 | 基线允许重复非零全局版本，或遗漏起点最后一条写 | 无删除模型中强制非零版本唯一、max(version)=start；修正原先不可能成立的正例，新增损坏基线回归 |
+
+Git 核验：修复工作树 HEAD 与本地 origin/B 均为 `ce4a853`，主工作树 main 为 `8874599`（比 origin/main 多 1 个参赛信息文档提交）；未发现适用 AGENTS.md，原有修改保留且实际暂存区为空。使用独立临时 Git index 将完整 B 树及未提交修复三路应用到本地 main，预演无冲突，未修改主工作树或创建提交。预演只针对本地引用，不代表远端在此后不会变化。
+
+代码和本地合并兼容性检查未发现剩余必须修复的阻塞，可作为修复提交进入 B 并合入 main；这不等于第三阶段正式冻结。修订后的接口仍需双方联合确认，真实 Engine、资源合规与性能验收均未执行。
+
+### 4.3 继续复核修正
+
+| 级别 | 发现 | 修复与验证边界 |
+| --- | --- | --- |
+| P1 | 缺少版本目录时原契约允许把段内 ID 判为不可见，会静默丢失有效数据 | 可查询段强制具备目录；未适配返回 unsupported，已声明的目录缺失/损坏返回 corruption，读取失败返回 io_error。仅修正声明和契约，真实适配器尚未实现 |
+| P1 | 上轮新增的“Job 内核峰值必须不超过限额”拒绝规则与 Windows 已有分配拒绝实验冲突，会把有效原始证据判为损坏 | 保留原始高水位及限额到 resource_evidence，派生 requires_review、不计分并退出 2；memory_acceptance 始终为 not_evaluated，不据此声称资源验收通过 |
+| P2 | 实际 direct_reads 可与配置不一致；累计 Job 峰值可以回退 | 检查实际布尔配置一致性，跨不可用采样保持已知累计峰值；新增合法增长和非法回退对照 |
+| P2 | 直接调用夹具生成函数会覆盖既有目录；一个写与一个查询、部分小种子会生成失败 | 参数先校验、排他创建新目录；按规模设置可实现的快照覆盖目标，必要时调整查询位置；默认夹具保持可复现 |
+
+五项定向反例在修复前均暴露问题（3 项断言失败、2 项异常），修复后 B 回归 87/87、A 回归 23/23。新增九项覆盖原始峰值超限、实际 I/O 配置、跨不可用采样的峰值单调性、目录覆盖保护及小规模轨迹生成；目录语义为设计修订，未伪造运行时验证。
+
+继续复核结束后重跑：Release/Debug 全目标构建成功，CTest 各 8/8（含 87 项 B 回归），B 契约自检 30 个负例、A 自检及 23 项 A 回归均通过。新目录往返生成的 14 个非 evaluation.json 工件哈希与仓库样例一致；完整修复树再次以临时 index 应用到本地 main 无冲突，实际暂存区仍为空、主工作树仍干净。未提交、合并或推送，也未开始第四阶段实现。
 
 ## 5 关键约定
 
@@ -84,10 +140,12 @@ PASS: static config, resource modes, static answer join, normal/uncertain output
 | PQ 与原生加载期内存的实际字节 | 未知，依赖构建后测量 |
 | 并发发布下的前缀一致性 | 缺压力测试 |
 
-## 7 与 A 的待确认点
+## 7 与 A 的交接关闭
 
-1. `Retire` 的调用时机需要 B 的视图引用计数归零作为前置条件，A 不自行推断。
-2. 版本目录页读取计入 metadata 预算，需与 A 的缓存准入共同验证驱逐压力下的表现。
-3. 构建子进程必须显式加入同一个 Job，A 的限额只对已加入进程生效。
-4. 预取计数口径：B 记 `admitted/consumed`，A 记真实提交与消费，两边差值需在联合复核时对齐。
-5. `Manifest` 的字节编码尚未实现，`EncodeManifest`/`DecodeManifest` 的容量与损坏语义需与 FORMAT-1 第 5 节逐条对齐。
+1. 已关闭：B 等旧发布者及 ReadViewLease 释放且满足持久发布/恢复前提后，锁外请求 Retire；A 继续保护独立块租约与在途读，最后引用释放后才删除。
+2. 已关闭：目录对象、稀疏定位与生命周期控制块占 metadata；块按 A 的 cache/workspace 固定归属，适配复制和 scratch 另计。驱逐压力与峰值转入实现验收。
+3. 已关闭：离线首建独立 Job，在线构建加入引擎同一 Job；挂起创建后先加入再恢复，失败终止，不能以独立子域绕开总额。
+4. 已关闭：B 使用 logical_blocks_read/logical_bytes_read、prefetch_admitted/prefetched_keys_used 作为本次 Expand 诊断；真实提交/完成/全局消费只取 A 的 EngineStats，不强行令两侧计数相等。
+5. 已关闭：INDEX-B-1.2 增补格式、适配器、WAL 回放边界、段 UUID 和 segment.json 引用；[FORMAT-1 第 2.1 节](storage-protocol.md#21-清单-json-与内存类型)固定完整 JSON、64 KiB 上限、容量/损坏语义与文件哈希核查分工，新增 22 项 schema 检查。C++ 编解码仍待实现。
+
+本次设计退出已关闭；真实 Engine 动态负载、正式资源合规与性能验收仍留后续阶段。复核由 Codex 按用户指示执行，未记录另一名成员签字。

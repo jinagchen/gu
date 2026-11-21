@@ -1,0 +1,24 @@
+Internal ctest changing into directory: C:/Users/将臣/Desktop/个人/操作系统比赛/build/windows
+Test project C:/Users/将臣/Desktop/个人/操作系统比赛/build/windows
+    Start 1: stage3_b_contracts
+1/9 Test #1: stage3_b_contracts ...............   Passed    2.43 sec
+    Start 2: stage3_b_regressions
+2/9 Test #2: stage3_b_regressions .............   Passed   13.93 sec
+    Start 3: stage3_manifest_contract
+3/9 Test #3: stage3_manifest_contract .........   Passed    0.26 sec
+    Start 4: benchmark_runner
+4/9 Test #4: benchmark_runner .................   Passed    1.00 sec
+    Start 5: benchmark_cli
+5/9 Test #5: benchmark_cli ....................   Passed    3.57 sec
+    Start 6: synchronous_storage
+6/9 Test #6: synchronous_storage ..............   Passed    0.30 sec
+    Start 7: windows_environment_probe
+7/9 Test #7: windows_environment_probe ........   Passed    0.18 sec
+    Start 8: job_process_tree
+8/9 Test #8: job_process_tree .................   Passed    0.27 sec
+    Start 9: job_commit_rejection
+9/9 Test #9: job_commit_rejection .............   Passed    0.08 sec
+
+100% tests passed, 0 tests failed out of 9
+
+Total Test time (real) =  22.08 sec
