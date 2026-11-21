@@ -46,6 +46,7 @@ Copyright 2026 proj47-RecallFlow contributors.
 - [第三阶段联合复核与冻结](docs/stage3-freeze.md)：2026 年 11 月 17 日关闭五处交接，冻结 DESIGN-1.1、STORAGE-A-1.1 与 INDEX-B-1.2，第三阶段设计验收通过。
 - [第四阶段 A 交付](docs/stage4-a-storage.md)：同步存储与并发基准生产端。
 - [第四阶段 B 交付](docs/stage4-b-completion.md)：真实索引适配、首次构建、静态 Engine、真实基准目标与评测闭环；含静态基线结果、重复运行对比与已知限制。
+- [第五阶段 A 交付](docs/stage5-a-completion.md)：有界 CLOCK 缓存、同块在途合并、Windows IOCP、下一跳预取和静态对照结果。
 
 公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 已按声明实现静态查询路径并能链接，写路径返回 `unsupported`；同步存储已有独立实现。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
@@ -82,7 +83,7 @@ Copyright 2026 proj47-RecallFlow contributors.
 ```text
 CMakeLists.txt
 include/agent_io/     核心公开接口
-src/storage/          同步读写、块格式和后续 Windows IOCP 后端
+src/storage/          同步与 Windows IOCP 读取、块缓存和预取调度
 src/index/            FORMAT-1 编解码、清单、首建与图适配
 src/engine/           静态查询引擎（写路径返回 unsupported）
 src/benchmark/        静态开放式并发基准运行器
@@ -101,8 +102,8 @@ docs/                 设计、实验方法和相关工作
 
 1. 已完成阶段二：固定 DiskANN 0.6.1 提交及补丁，跑通小规模构建、加载和静态查询。
 2. 已交付阶段四 A 侧同步存储和静态基准生产端，分别通过小数据探针和合成目标检查。
-3. 待实现 `IndexAdapter`、`vector_build` 和静态 `Engine`，将真实查询接入 `vector_bench`，保存结果 ID、读取量、延迟和资源工件。
-4. 由 Python 对照独立精确答案计算 Recall@10，联合复核召回、内存和重复运行证据，通过静态基线验收后再开展缓存与预取消融。
+3. 已将 `IndexAdapter`、`vector_build` 和静态 `Engine` 接入 `vector_bench`，Python 独立计算 Recall@10，并复核内存与重复运行证据。
+4. 已完成第五阶段 A 的静态读路径对照，记录缓存、IOCP 与预取对读取量、延迟及资源的影响。
 
 静态基线通过后再加入插入、更新、WAL 和后台合并，动态评测使用对应数据版本的真实答案。
 
