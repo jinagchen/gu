@@ -155,7 +155,7 @@ struct DecodedWalFrame {
     std::uint64_t consumed_bytes;
 };
 
-// Declaration-only FORMAT-1 codecs; callers supply already reserved storage.
+// FORMAT-1 codecs; callers supply already reserved, non-overlapping storage.
 Result<std::uint64_t> WalFrameBytes(std::uint32_t dimension);
 Result<Success> EncodeWalFileHeader(
     const WalFileHeader& header, std::span<std::byte> output);
@@ -166,6 +166,7 @@ Result<DecodedWalFrame> DecodeWalFrame(
     std::span<const std::byte> input, std::uint32_t expected_dimension,
     std::uint32_t max_frame_bytes);
 
+// Serialized by the caller. Sync does not publish or acknowledge any records.
 class WalWriter {
 public:
     virtual ~WalWriter() = default;

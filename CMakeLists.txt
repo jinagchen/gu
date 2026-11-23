@@ -33,11 +33,12 @@ target_link_libraries(vector_build PRIVATE agent_io_index)
 
 add_library(agent_io_storage STATIC
     src/storage/synchronous_storage.cpp src/storage/synchronous_block_reader.cpp
-    src/storage/optimized_block_reader.cpp)
+    src/storage/optimized_block_reader.cpp src/storage/wal_codec.cpp src/storage/wal_writer.cpp)
 target_include_directories(agent_io_storage PUBLIC include)
 target_compile_features(agent_io_storage PUBLIC cxx_std_20)
 target_compile_definitions(agent_io_storage PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_link_libraries(agent_io_storage PRIVATE ole32)
 
 add_library(agent_io_benchmark STATIC src/benchmark/runner.cpp)
 target_include_directories(agent_io_benchmark PUBLIC include)
@@ -57,6 +58,12 @@ target_link_libraries(synchronous_storage_test PRIVATE agent_io_storage)
 target_compile_definitions(synchronous_storage_test PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 
+add_executable(wal_test tests/storage/wal-test.cpp)
+target_link_libraries(wal_test PRIVATE agent_io_storage)
+target_include_directories(wal_test PRIVATE src/storage)
+target_compile_definitions(wal_test PRIVATE
+    WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+
 add_executable(windows_environment_probe tools/environment/windows-probe.cpp)
 target_compile_features(windows_environment_probe PRIVATE cxx_std_20)
 target_compile_definitions(windows_environment_probe PRIVATE
@@ -72,7 +79,7 @@ if(MSVC)
     foreach(target agent_io_contracts agent_io_index_contracts
                    agent_io_storage agent_io_index agent_io_engine
                    agent_io_benchmark benchmark_runner_test index_engine_test
-                   synchronous_storage_test vector_build
+                   synchronous_storage_test wal_test vector_build
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
@@ -156,6 +163,8 @@ if(TARGET vector_build AND EXISTS "${AGENT_IO_TEST_PYTHON}")
 endif()
 add_test(NAME synchronous_storage COMMAND synchronous_storage_test)
 set_tests_properties(synchronous_storage PROPERTIES TIMEOUT 30)
+add_test(NAME wal COMMAND wal_test)
+set_tests_properties(wal PROPERTIES TIMEOUT 30)
 add_test(NAME windows_environment_probe COMMAND windows_environment_probe)
 set_tests_properties(windows_environment_probe PROPERTIES TIMEOUT 20)
 add_test(NAME job_process_tree COMMAND job_runner 64 10
