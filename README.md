@@ -10,7 +10,7 @@
 
 技术路线为 C++20 核心加 Python 评测，当前平台为原生 Windows x64。**截至 2026 年 11 月 23 日，静态检索和读优化可运行，WAL 底层已交付，但 Engine 仍不能插入、更新或重放日志。** [项目状态与下一步](docs/project-status.md)集中记录能力、验证结果和验收缺口。
 
-2026 年 11 月 23 日复核公开赛题窗口，华北区域赛初赛仍于 **2026 年 12 月 11 日 23:59** 截止。准备完整工程、设计实现文档、过程资料、进展汇报幻灯片和仓库内解说视频；提交前用队伍账号核对入口和回执。[赛程与提交清单](docs/open-questions.md#已核实的赛程与提交信息)
+华北区域赛**报名截止：2026 年 12 月 6 日**；**初赛作品提交截止：2026 年 12 月 11 日 23:59**（希冀赛题窗口）。准备完整工程、设计实现文档、过程资料、进展汇报幻灯片和仓库内解说视频；用队伍账号核对报名状态、提交入口和回执。[赛程与提交清单](docs/open-questions.md#已核实的赛程与提交信息)
 
 ## 许可证
 
@@ -105,6 +105,11 @@ docs/                 设计、实验方法和相关工作
 
 核心采用 MSVC、CMake、Windows SDK、同步 ReadFile 和 Overlapped I/O + IOCP。无缓冲读取使用 FILE_FLAG_NO_BUFFERING，WAL 刷盘使用 FlushFileBuffers。详细设计见 [Windows 平台约定](docs/windows-platform.md)，本机配置与实测范围见[阶段二环境与验收](docs/stage2-completion.md)。
 
+### 完整测试的前置条件
+
+- **使用 ASCII 路径。** 建议把源码检出到 `D:\agent-io`，并使用只含 ASCII 字符的构建、运行和临时目录。含中文等非 ASCII 字符的路径传给首建时，可能报 `Input paths must be ASCII`。在运行下方命令前，先创建 `D:\agent-io-tmp`，并在当前 PowerShell 中将 `TEMP` 和 `TMP` 都设为该目录。
+- **使用 LF 检出。** `.gitattributes` 默认以 LF 检出文本，标记为 `-text` 的历史工件和补丁保留原始字节。已有工作副本可用 `git ls-files --eol -- evaluation/examples/stage3-b/trace.jsonl` 检查是否为 `w/lf`；如果看到 `w/crlf` 或测试报 `Checksum mismatch: trace.jsonl`，请将包含此规则的版本重新检出到新的 ASCII 目录，保留原工作副本中的未提交改动。
+
 在已加载 Visual Studio 工具环境的 PowerShell 中运行：
 
 ```powershell
@@ -113,7 +118,7 @@ cmake --build build/windows --config Release
 ctest --test-dir build/windows -C Release -V
 ```
 
-如 `vector_bench` 未生成，配置时设置 `AGENT_IO_BOOST_INCLUDE` 指向固定 Boost 的 `include` 目录。完整 CTest 还需要 `AGENT_IO_TEST_PYTHON` 指向已安装锁定依赖的解释器；默认是仓库 `.venv/Scripts/python.exe`。复现全套测试请用 LF 检出（克隆时设置 `core.autocrlf=false`、`core.eol=lf`），并使用 ASCII 源码、构建和临时目录；尤其不能将含中文的默认输出路径传给 `vector_build`。将 `TEMP`、`TMP` 指向预先创建的 ASCII 目录。普通终端找不到 `cmake` 时，使用[随附工具路径](docs/stage2-completion.md#61-独立环境探针)。
+如 `vector_bench` 未生成，配置时设置 `AGENT_IO_BOOST_INCLUDE` 指向固定 Boost 的 `include` 目录。完整 CTest 还需要 `AGENT_IO_TEST_PYTHON` 指向已安装锁定依赖的解释器；默认是仓库 `.venv/Scripts/python.exe`。普通终端找不到 `cmake` 时，使用[随附工具路径](docs/stage2-completion.md#61-独立环境探针)。
 
 Python 侧校验命令（使用 `.venv` 中的解释器）：
 

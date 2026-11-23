@@ -4,7 +4,7 @@
 
 ## 结论
 
-B 侧第四阶段的六项产出全部落地并在本机跑通：真实 IndexAdapter、首次构建程序、Engine 静态查询、真实基准目标、评测闭环、交付文档。`ctest` 11 项全过（其中 `index_engine` 147 条断言、`build_contract` 28 个用例）。在 Job 提交限额下产出的静态基线 `runs/stage4-static-001` 由 `evaluation.check` 判定 `verdict=pass`，10 项协议检查全部 pass、Recall@10 = 1.000；同一命令重复运行 25 项状态严格相同、0 项分歧。
+B 侧第四阶段的六项产出全部落地并在本机跑通：真实 IndexAdapter、首次构建程序、Engine 静态查询、真实基准目标、评测闭环、交付文档。2026 年 11 月 21 日交付时，`ctest` 11/11 通过（其中 `index_engine` 147 条断言、`build_contract` 28 个用例）；新增 WAL 测试后的复核见[项目状态](project-status.md#本次复核)。在 Job 提交限额下产出的静态基线 `runs/stage4-static-001` 由 `evaluation.check` 判定 `verdict=pass`，10 项协议检查全部 pass、Recall@10 = 1.000；同一命令重复运行 25 项状态严格相同、0 项分歧。
 
 有两处必须一并说明，否则数字会被误读：召回 1.000 是在 512 个 16 维向量的小夹具上取得的，每个查询实际读取约 438 行（接近全图），因此它证明的是链路与协议正确，不是检索效率；内存只验证了 Job 提交限额内可运行，`memory_acceptance` 仍为 `not_evaluated`，不构成 REQ-1.0 的内存比例结论。
 
