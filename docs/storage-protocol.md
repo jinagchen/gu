@@ -2,7 +2,7 @@
 
 设计版本 FORMAT-1，日期 2026 年 11 月 10 日。本机 Windows 平台修订对应 DESIGN-1.1，WAL 字节布局不变，文件发布与同步改用 Windows API。该格式尚未写入真实索引，不声明与 DiskANN 内部文件格式兼容。
 
-2026 年 11 月 11 日增加 A 侧编码/解码、追加、同步、轮换和回收交接，见 [STORAGE-A-1](stage3-a-contract.md)和 [storage.hpp](../include/agent_io/storage.hpp)，不改变 FORMAT-1 字段、字节序或 CRC 范围。编解码只有声明，恢复及发布编排仍属 B，尚无进程恢复测试结果。
+2026 年 11 月 11 日增加 A 侧编码/解码、追加、同步、轮换和回收交接；2026 年 11 月 23 日实现 [WAL 底层](stage6-a-wal.md)，不改变 FORMAT-1 字段、字节序或 CRC 范围。Engine 恢复及发布编排仍属 B。
 
 2026 年 11 月 17 日冻结补充：清单 JSON 与 INDEX-B-1.2 的定长内存类型逐字段对应，规则见第 2.1 节。WAL 和版本目录字节布局不变；此前未实现清单编码，本次首次明确其完整 schema。[阶段三冻结记录](stage3-freeze.md)列出交接结论与后续实现验收。
 
@@ -97,7 +97,7 @@ SHA256 一律 64 位小写十六进制字符串，编码时由 Digest 转换。s
 
 WAL 用普通顺序 WriteFile 与 FlushFileBuffers，初版不启用 FILE_FLAG_NO_BUFFERING。所有整数字段为小端；浮点载荷按 IEEE 754 binary32 小端编码。每条记录独立校验，不承诺多记录事务。
 
-每个日志文件先有 64 字节文件头，记录从偏移 64 开始。文件头为 magic `AGIOLOG1`（8 字节）、format_version=1（uint32）、header_bytes=64（uint32）、instance_id 的 RFC 4122 字节序 UUID（16 字节）、start_sequence（uint64）、零保留位（20 字节）及 CRC32C（4 字节，对前 60 字节计算）。start_sequence 必须与文件名及首条记录一致；恢复先检查实例身份，不能把另一索引的日志拿来重放。空的新日志允许暂时没有首条记录，但不推进可见序号。
+每个日志文件先有 64 字节文件头，记录从偏移 64 开始。文件头为 magic `AGIOLOG1`（8 字节）、format_version=1（uint32）、header_bytes=64（uint32）、instance_id 的 RFC 4122 字节序 UUID（16 字节）、start_sequence（uint64）、零保留位（20 字节）及 CRC32C（4 字节，对前 60 字节计算）。start_sequence 必须与文件名及首条记录一致；恢复先检查实例身份，不能把另一索引的日志拿来重放。文件名使用每个文件独立的 UUID，与头内的实例 UUID 无关；UUID 不提供时间顺序。空的新日志允许暂时没有首条记录，但不推进可见序号。
 
 每条记录的固定头也为 64 字节：
 
@@ -121,7 +121,7 @@ WAL 用普通顺序 WriteFile 与 FlushFileBuffers，初版不启用 FILE_FLAG_N
 frame_bytes = align_up(64 + dimension * 4 + 4, 8)
 ```
 
-CRC32C 使用 Castagnoli 多项式，标准初始值及最终异或均为 0xffffffff，对“头 + 载荷”的确切字节计算，不包括 CRC 字段或填充。实现前用公开测试向量验证 CRC 算法，但本次未实现。
+CRC32C 使用 Castagnoli 多项式，标准初始值及最终异或均为 0xffffffff，对“头 + 载荷”的确切字节计算，不包括 CRC 字段或填充。实现使用标准 `"123456789" → 0xe3069283` 向量和固定字节样例验证。
 
 读取头后先检查最大维度、合法运算和 frame_bytes 上限，再分配或读取载荷；不能信任日志中的长度。保留字段和填充非零、维度错误、非法操作或完整帧 CRC 不匹配均报 corruption。
 
@@ -192,4 +192,4 @@ CRC32C 使用 Castagnoli 多项式，标准初始值及最终异或均为 0xffff
 
 原 Linux 发布方案不作为 Windows 已具备的保证，详见 [Windows 平台约定](windows-platform.md)。
 
-WAL 文件轮换候选大小已在 STORAGE-A-1 固定为 64 MiB，单帧上限 1 MiB，组边界轮换，实际实现与故障验证待完成。图原生格式、每块校验方案、数据文件填充可行性、运行时目标卷对齐和构建内存开销仍随 B 的适配与实现验证。改变 FORMAT-1 字段、字节序或 CRC 范围须升级格式，不靠编译器结构体布局隐式变更。
+WAL 文件轮换默认 64 MiB，单帧默认上限 1 MiB，组边界轮换；底层实现和故障测试见 [第六阶段 A](stage6-a-wal.md)。图原生格式、每块校验方案、数据文件填充可行性、运行时目标卷对齐和构建内存开销仍随 B 的适配与实现验证。改变 FORMAT-1 字段、字节序或 CRC 范围须升级格式，不靠编译器结构体布局隐式变更。

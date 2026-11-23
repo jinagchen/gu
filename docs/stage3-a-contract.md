@@ -1,6 +1,6 @@
 # 第三阶段 A 侧存储与基准契约
 
-日期：2026 年 11 月 17 日冻结修订，版本 STORAGE-A-1.1，对应 API-1.2、EVAL-1.1 和 DESIGN-1.1；FORMAT-1 的 WAL 字节布局保持不变。本文件定义 A 的交付，供 B 对接。同步存储与静态基准已有第四阶段实现，缓存、IOCP 后端与 WAL 编解码仍待实现；交接关闭情况见[冻结记录](stage3-freeze.md)。
+日期：2026 年 11 月 17 日冻结修订，版本 STORAGE-A-1.1，对应 API-1.2、EVAL-1.1 和 DESIGN-1.1；FORMAT-1 的 WAL 字节布局保持不变。本文件定义 A 的交付，供 B 对接。交接关闭情况见[冻结记录](stage3-freeze.md)；后续实现见[第五阶段读优化](stage5-a-completion.md)和[第六阶段 WAL 底层](stage6-a-wal.md)。
 
 ## 1 范围与交接
 

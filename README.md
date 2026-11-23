@@ -47,6 +47,7 @@ Copyright 2026 proj47-RecallFlow contributors.
 - [第四阶段 A 交付](docs/stage4-a-storage.md)：同步存储与并发基准生产端。
 - [第四阶段 B 交付](docs/stage4-b-completion.md)：真实索引适配、首次构建、静态 Engine、真实基准目标与评测闭环；含静态基线结果、重复运行对比与已知限制。
 - [第五阶段 A 交付](docs/stage5-a-completion.md)：有界 CLOCK 缓存、同块在途合并、Windows IOCP、下一跳预取和静态对照结果。
+- [第六阶段 A：WAL 底层](docs/stage6-a-wal.md)：FORMAT-1 编解码、顺序追加、刷盘、轮换和故障验证；待接入 Engine 动态写入与恢复。
 
 公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 已按声明实现静态查询路径并能链接，写路径返回 `unsupported`；同步存储已有独立实现。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
@@ -83,12 +84,10 @@ Copyright 2026 proj47-RecallFlow contributors.
 ```text
 CMakeLists.txt
 include/agent_io/     核心公开接口
-src/storage/          同步与 Windows IOCP 读取、块缓存和预取调度
-src/index/            FORMAT-1 编解码、清单、首建与图适配
+src/storage/          同步与 Windows IOCP 读取、块缓存、预取和 WAL
+src/index/            清单与版本目录、首建与图适配
 src/engine/           静态查询引擎（写路径返回 unsupported）
 src/benchmark/        静态开放式并发基准运行器
-src/cache/            固定容量缓存、准入和在途读取去重（未实现）
-src/update/           WAL、版本信息和后台合并（未实现）
 tools/                环境探针、基准与首建 CLI、契约自检与基线驱动
 tests/                核心正确性、恢复和并发测试
 evaluation/           Python 数据处理、实验编排和结果分析
@@ -104,8 +103,9 @@ docs/                 设计、实验方法和相关工作
 2. 已交付阶段四 A 侧同步存储和静态基准生产端，分别通过小数据探针和合成目标检查。
 3. 已将 `IndexAdapter`、`vector_build` 和静态 `Engine` 接入 `vector_bench`，Python 独立计算 Recall@10，并复核内存与重复运行证据。
 4. 已完成第五阶段 A 的静态读路径对照，记录缓存、IOCP 与预取对读取量、延迟及资源的影响。
+5. 第六阶段 A 已实现 WAL 底层；动态写入、查询可见性和恢复仍待 A/B 联调。
 
-静态基线通过后再加入插入、更新、WAL 和后台合并，动态评测使用对应数据版本的真实答案。
+动态评测使用对应数据版本的真实答案；在线后台合并属于第七阶段。
 
 ## 开发环境
 
