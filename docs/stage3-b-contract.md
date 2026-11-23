@@ -1,6 +1,8 @@
 # 第三阶段 B 侧索引、增量与动态评测契约
 
-日期：2026 年 11 月 17 日。冻结版本 INDEX-B-1.2，对应 API-1.2、EVAL-1.1、STORAGE-A-1.1 与 DESIGN-1.1；FORMAT-1 的 WAL 字节布局保持不变。1.1 补齐全局序号、捕获前缀和工作区参数，并移除输入轨迹对实际提交和快照的预测；1.2 补齐清单类型及逻辑读取/预取诊断计量。旧 INDEX-B-1 轨迹中的 sequence / committed_prefix_at_arrival 不再合法，须重新生成；查询、写入输出工件的 EVAL-1.1 字段不变。声明位于 [index.hpp](../include/agent_io/index.hpp)，全部为声明，尚无 IndexAdapter、DeltaStore、首次构建或合并实现。交接结论见[冻结记录](stage3-freeze.md)。
+日期：2026 年 11 月 17 日。冻结版本 INDEX-B-1.2，对应 API-1.2、EVAL-1.1、STORAGE-A-1.1 与 DESIGN-1.1；FORMAT-1 的 WAL 字节布局不变。1.1 补齐全局序号、捕获前缀和工作区参数；1.2 补齐清单类型及逻辑读取/预取诊断。旧轨迹不再接受 `sequence` 或 `committed_prefix_at_arrival`，须重新生成。布局与接口见 [index.hpp](../include/agent_io/index.hpp) 及[冻结记录](stage3-freeze.md)。
+
+实现补记：静态 IndexAdapter、首次构建、版本目录与清单已在[第四阶段](stage4-b-completion.md)实现；静态基线采用自有 FORMAT-1 图，DiskANN 是当时的选型，不是现有首建后端。动态 `DeltaStore`、跨段版本融合与合并仍是本契约规定的目标。
 
 ## 1 范围与交接
 
@@ -221,8 +223,8 @@ ReserveSlot -> WriteSlot -> PublishPrefix（publication_mutex 下）
 | 头文件语法与类型约束 | 已通过 | `header-smoke-b.cpp` 在 MSVC `/W4 /WX` 下编译 |
 | ScratchPlan 上界是否真能装入 workspace | 未验证 | 大维度与 8 查询并发实测峰值 |
 | 稳定槽前缀与视图一致性 | 未验证 | 并发发布 + 长查询压测 |
-| 首次构建受限域 | 未验证 | Job 限额下构建并记录峰值提交 |
+| 首次构建受限域 | 小夹具已验证，规模化未验 | Job 限额下记录大规模构建峰值提交 |
 | 版本目录读取预算 | 未验证 | 驱逐压力下统计 metadata 驻留 |
 | PQ/元数据绕行实际字节 | 未验证 | 依赖参数与进程实际分配对照 |
 
-本契约可用于 A/B 并行实现；在此之前不得宣称索引层、增量层或构建链已实现。
+小规模首建和静态图适配不等于动态索引验收；后续依本契约验证增量、快照和跨代次资源。

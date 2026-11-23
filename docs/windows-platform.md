@@ -12,10 +12,10 @@
 | --- | --- | --- |
 | 同步读取 | CreateFileW + ReadFile | 本机临时文件内容比对通过 |
 | 绕过系统文件数据缓存 | FILE_FLAG_NO_BUFFERING | 本机临时文件探针通过，不宣称绕过设备缓存 |
-| 异步读取 | FILE_FLAG_OVERLAPPED + IOCP | 两个不同偏移读取、完成身份与内容检查通过 |
+| 异步读取 | FILE_FLAG_OVERLAPPED + IOCP | 独立探针及真实静态 Engine 已验证；混合负载待验 |
 | 缓冲对齐 | FileStorageInfo 探测，按逻辑/物理扇区和块大小分配 | 本次逻辑扇区 512 字节，保守地址对齐 4096 字节；正式数据卷需重新探测 |
-| WAL 写入与刷盘 | 普通顺序 WriteFile + FlushFileBuffers | 刷盘调用成功，不等于已验证断电恢复 |
-| 目录独占 | 独占打开 LOCK 的 HANDLE，生命周期覆盖 Engine | 待实现，不只判断 LOCK 文件是否存在 |
+| WAL 写入与刷盘 | 普通顺序 WriteFile + FlushFileBuffers | 已有底层轮换、失败与进程终止用例；未接入 Engine，不等于断电恢复 |
+| 目录独占 | 独占打开 LOCK 的 HANDLE，生命周期覆盖 Engine | 静态 Engine 已实现；动态恢复编排尚未接入 |
 | 内存限制 | 独立 benchmark Job Object 设置提交内存限额 | 已有启动器、子进程归属、提交拒绝及小数据构建/查询/重建计量；官方口径未关闭 |
 
 每个已接管异步请求持有文件、缓冲和 OVERLAPPED，最终完成前不得回收。默认完成模式下 ReadFile 立即成功也会产生 IOCP 完成通知；只能处理一次业务完成。第一版不启用跳过成功通知的优化，不以 CancelIoEx 返回成功代替实际完成。
@@ -26,7 +26,7 @@
 
 不将 Linux 的 fdatasync、rename 和目录 fsync 调用逐字搬到 Windows。
 
-WAL 先完整追加、FlushFileBuffers 成功，再发布内存视图并确认写入。新 WAL 的创建、截断与轮换仍须通过 Windows 进程故障验证；不得据单次刷盘调用声称断电安全。
+目标写入顺序是 WAL 完整追加并 `FlushFileBuffers` 成功，再发布内存视图、确认写入。[WAL 底层](stage6-a-wal.md)已验证文件创建、轮换和进程终止后的截断观察；Engine 打开后的重放、尾部处理及恢复后续写仍待验证，不承诺断电安全。
 
 新段及清单使用唯一文件名，关闭或刷盘后才允许被发布清单引用。CURRENT 替换拟用 ReplaceFileW，首次创建拟用同卷 MoveFileExW；完整步骤见[存储协议](storage-protocol.md)。ReplaceFileW 的 REPLACEFILE_WRITE_THROUGH 标志不受支持，不能借此声称已同步目录。
 
@@ -36,7 +36,7 @@ WAL 先完整追加、FlushFileBuffers 成功，再发布内存视图并确认�
 
 Job Object 的 JobMemoryLimit 限制提交内存，不等同于物理内存或整个系统文件缓存上限。工作集限额也不能单独替代严格总内存约束。
 
-阶段二已实现独立 `job_runner`，主进程启动挂起后先加入 Job Object 再恢复，子进程继承受限域，禁用逃逸。已测小数据构建、查询和旧索引驻留重建；Python 离线答案与绘图在查询计量域之外执行。记录内核 job 提交峰值及每 5 ms 采样的进程 private bytes、working set；共享页和系统缓存口径单独披露。正式 Engine 接入及规模化运行仍待实现。索引依赖若自行 mmap 或绕过存储层，必须额外核算并说明。
+独立 `job_runner` 将挂起的主进程先加入 Job Object 再恢复，子进程继承受限域，禁用逃逸。已测小数据构建、真实静态 Engine 查询和阶段二的旧索引驻留重建；Python 离线答案与绘图在查询计量域之外执行。记录 Job 内核提交峰值及每 5 ms 采样的进程私有字节和工作集；共享页和系统缓存单独披露。正式规模及动态运行待验。绕过存储层的读取或映射必须另行核算。
 
 初始探针设置 67108864 字节 job 提交限额，8 MiB 分配成功，96 MiB 提交被拒绝，错误码 1455。QueryInformationJobObject 返回的 PeakJobMemoryUsed 为 101670912 字节，大于配置值；后续独立启动器复测同类负例，拒绝后采样私有提交仅约 2 MB，内核高水位仍约 103 MB。原始值如实保留，不能将该高水位当作成功提交量或宣称“峰值物理内存始终小于 64 MiB”。正常小数据运行的提交峰值、私有提交和工作集均有独立记录，见[阶段二验收](stage2-completion.md)。
 

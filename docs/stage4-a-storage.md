@@ -1,6 +1,6 @@
 # 第四阶段 A：同步存储首批交付
 
-日期：2026 年 11 月 12 日。状态：同步存储模块已实现并验证，第四阶段整体尚未完成。沿用 API-1.2 的抽象接口，在 [synchronous_storage.hpp](../include/agent_io/synchronous_storage.hpp) 添加工厂；不修改 B 的索引与动态接口。
+日期：2026 年 11 月 12 日。本记录保留同步存储首批交付范围；当时静态 Engine 未接通。沿用 API-1.2，在 [synchronous_storage.hpp](../include/agent_io/synchronous_storage.hpp) 添加工厂，不修改 B 的索引与动态接口。
 
 ## 已实现
 
@@ -45,4 +45,4 @@ $ctestExe = Join-Path (Split-Path $cmakeExe) 'ctest.exe'
 
 B 可使用 `ReadBatch` 的只读块租约对接 IndexAdapter，先明确原生节点映射、读取批次与 scratch 上界；不能保存脱离租约的裸 span。新接口由 `agent_io_storage` 导出，使用 CMake `target_link_libraries(... PRIVATE agent_io_storage)`。
 
-2026 年 11 月 15 日，A 已实现静态 C++ 并发基准的有界队列、计时与 EVAL-1.1 输出，见[基准交付记录](stage4-a-benchmark.md)。B 仍须补首次构建工件、正式 IndexAdapter 和独立评测，并接入真实查询目标；双方集成后才能验收第四阶段完整同步 Engine。缓存/IOCP/预取、WAL 实现和动态恢复分别在后续对应阶段推进。
+后续已接通[静态基准生产端](stage4-a-benchmark.md)、[首建与真实静态 Engine](stage4-b-completion.md)，并加入[缓存、IOCP 与预取](stage5-a-completion.md)。当时的 DiskANN 探针仍是独立验证，不是当前 Engine 的构建后端。WAL 已交付到底层，动态恢复仍待接入。

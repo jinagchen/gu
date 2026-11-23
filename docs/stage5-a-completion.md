@@ -33,10 +33,12 @@
 
 ## 验证与复现
 
-Release 和 Debug 的 CTest 均通过 11 项。存储用例覆盖 CLOCK 替换、固定块下的工作区回退、文件退休、同块共享、预取配额、等待超时后的引用保留、短读不发布、原生 IOCP 错误及关闭排空。回归在 LF 检出的 ASCII 路径下运行，以满足历史固定校验和与首建路径约束。
+本阶段交付时，Release 和 Debug 的 CTest 各通过 11 项。存储用例覆盖 CLOCK 替换、工作区回退、文件退休、同块共享、预取配额、等待超时后的引用保留、短读不发布、原生 IOCP 错误及关闭排空。复现使用 LF 检出的 ASCII 路径，以满足示例固定校验和与首建路径约束。
 
 ```powershell
 .\.venv\Scripts\python.exe tools/storage/run-stage5.py --output D:/agent-io-stage5/repro
 ```
 
 脚本生成每组配置、查询及评测工件，并校验查询结果一致、召回阈值、预算及在途上限。仓库保留[汇总数据](evidence/stage5-a/summary.json)和[延迟分布](evidence/stage5-a/latency-cdf.png)。
+
+2026 年 11 月 23 日用 `fcb51f8` 复测十组，查询输出仍一致，Recall@10 均为 1.000。8 MiB 档 47 个预取块均被消费，其中 8 个在首次需求时已就绪；128 KiB 档仍未能提交预取。该次单轮延迟不能证明稳定收益；历史表格和原始工件未改。[复测详情](project-status.md#本次复核)

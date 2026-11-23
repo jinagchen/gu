@@ -1,6 +1,6 @@
 # 磁盘格式和恢复协议
 
-设计版本 FORMAT-1，日期 2026 年 11 月 10 日。本机 Windows 平台修订对应 DESIGN-1.1，WAL 字节布局不变，文件发布与同步改用 Windows API。该格式尚未写入真实索引，不声明与 DiskANN 内部文件格式兼容。
+设计版本 FORMAT-1，日期 2026 年 11 月 10 日，对应 DESIGN-1.1。`vector_build` 已在真实静态索引中发布 `CURRENT`、清单、段及版本目录；FORMAT-1 为项目自有格式，不声明与 DiskANN 文件兼容。下文的写入确认、重放、checkpoint 与旧 WAL 回收是目标协议，不是当前 Engine 能力。
 
 2026 年 11 月 11 日增加 A 侧编码/解码、追加、同步、轮换和回收交接；2026 年 11 月 23 日实现 [WAL 底层](stage6-a-wal.md)，不改变 FORMAT-1 字段、字节序或 CRC 范围。Engine 恢复及发布编排仍属 B。
 

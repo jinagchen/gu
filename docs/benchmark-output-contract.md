@@ -2,7 +2,7 @@
 
 日期：2026 年 11 月 11 日，协议 EVAL-1.1，A 生产端交付。schema_version 保持 1，新增 protocol_version="EVAL-1.1" 区分字段修订，旧 EVAL-1 示例一并升级。本文件与 [评测协议](evaluation-protocol.md)、[A 侧契约](stage3-a-contract.md)共同使用。
 
-A 侧示例均为 purpose="contract_example" 的手工协议样例，不对应真实向量文件或运行结果。B 已于 2026 年 11 月 16 日交付动态输入轨迹、精确答案生成端和 evaluation.json 消费端（见 [B 侧交付记录](stage3-b-completion.md)），其样例有小型真实输入文件，但结果由精确参考生成，同样标为 contract_example，不构成引擎运行结论。
+A 侧示例均为 purpose="contract_example" 的手工协议样例，不对应真实向量文件或运行结果。B 已于 2026 年 11 月 16 日交付动态输入轨迹、精确答案生成端和 evaluation.json 消费端（见 [B 侧动态夹具与复核](stage3-freeze.md#62-b-侧动态夹具与复核)），其样例有小型真实输入文件，但结果由精确参考生成，同样标为 contract_example，不构成引擎运行结论。
 
 ## 1 类型规则
 
@@ -128,4 +128,4 @@ environment.json 须记录 job_limit_commit_bytes、sample_interval_ms、测量�
 .\.venv\Scripts\python.exe tools/contracts/test-stage3-a.py
 ```
 
-校验器检查本次固定配置及示例的类型、字段、顺序、守恒、序号关联和模式预算；负例检查协议矛盾会被拒绝。它是生产端契约自检，不是正式测量入口，也不实现独立向量答案、动态轨迹生成或 B 的 evaluation.check。文件哈希和向量内容由已交付的 B 消费端独立验证，真实 Engine 测量仍待后续集成。
+校验器检查固定配置及示例的类型、字段、顺序、守恒、序号关联和模式预算；负例验证协议矛盾会被拒绝。它不是测量入口。真实静态测量使用 `vector_bench --target engine`，独立验证使用 `evaluation.check`。读优化的附加诊断进入 `summary.json`，不改变 `counters.json` 的字段；动态写入字段仍只有协议样例，没有真实 C++ 动态运行数据。[评测协议](evaluation-protocol.md)

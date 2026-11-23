@@ -1,4 +1,4 @@
-# 第二阶段验收记录
+# 第二阶段环境与验收记录
 
 日期：2026 年 11 月 10 日。结论：按本机 Windows 的工程可行性范围，阶段二通过。按用户确认，不要求另一位成员执行复现。官方规则确认、完整 Engine、规模化性能、动态合并及 WAL 恢复属于后续验收。
 
@@ -76,6 +76,41 @@
 
 ## 5 后续验收
 
-阶段四实现正式静态 Engine、同步对照与统一资源统计；随后验证缓存、IOCP 与并发。动态阶段实现 WAL/清单发布、故障恢复和多轮有界合并，再执行大工作集和官方比例测试。官方平台、数据、依赖规则及内存口径继续按开放问题跟进。
+阶段二之后，小规模静态 Engine、同步对照、缓存与 IOCP 已验证，WAL 底层已交付。接下来验收 Engine 动态发布、进程恢复与多轮有界合并，再执行大工作集测试。官方平台、数据、依赖规则及内存口径继续按开放问题跟进；见[项目状态](project-status.md)。
 
 本阶段通过表示原生 Windows 的依赖、读路径和资源测量具备小规模工程可行性，不表示全部 R-001 至 R-022 已通过，也不产生性能提升结论。
+
+## 6 本机环境与基础探针
+
+当前使用本机原生 Windows 编辑、构建和评测，不需要 WSL 或 liburing。此前曾计划在租用服务器运行；当时截图显示 Windows Server 2022、2 vCPU、4 GiB、40 GiB ESSD Entry，状态为已停止。未连接、修改或取消租用，不将截图视作实测。官方平台见[待确认事项](open-questions.md)。
+
+| 项目 | 已记录环境 |
+| --- | --- |
+| 系统与硬件 | Windows 11 家庭版中文版 x64（10.0.26200）；Intel Core i7-14650HX（16 核、24 逻辑处理器）；内存约 16 GB |
+| 本地存储 | 约 1 TB NVMe SSD，C/D 卷为 NTFS；2026 年 11 月 10 日空闲分别为 28,601,802,752 与 102,570,381,312 字节。正式实验前重新采集 |
+| C++ 工具链 | Visual Studio Community 2022 17.13.6；MSVC 19.43.34810.0（工具目录 14.43.34808）；Windows SDK 10.0.22621.0；随附 CMake 3.30.5-msvc23 |
+| 隔离 Python | 2026 年 11 月 23 日核对 `.venv`：Python 3.12.10、NumPy 2.2.6、Matplotlib 3.10.3；普通终端的 `python` 不一定指向该环境 |
+
+### 6.1 独立环境探针
+
+普通 PowerShell 找不到 `cmake` 时，可用 Visual Studio 随附的工具，只构建并测试 [Windows 环境探针](../tools/environment/windows-probe.cpp)：
+
+```powershell
+$cmakeExe = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+$ctestExe = Join-Path (Split-Path $cmakeExe) 'ctest.exe'
+& $cmakeExe -S . -B build/windows -G 'Visual Studio 17 2022' -A x64
+& $cmakeExe --build build/windows --config Release --target windows_environment_probe
+& $ctestExe --test-dir build/windows -C Release -R '^windows_environment_probe$' -V
+```
+
+最初的 1/1 验证记录如下。后续的卷上实验、计量限制及阶段二证据见本文件前文；最新静态 Engine 和 WAL 复测见[项目状态](project-status.md#本次复核)。
+
+```text
+file_flush=pass; logical_sector=512; alignment=4096
+synchronous_unbuffered_read=pass; bytes=4096
+iocp_unbuffered_reads=pass; requests=2; bytes=8192
+job_commit_limit=pass; limit_bytes=67108864; rejected_bytes=100663296; error=1455; peak_job_commit_bytes=101670912
+scope=functionality_only; engine_not_implemented
+```
+
+探针只操作系统临时目录中自己创建的文件，Job 限额作用于探针进程；当时验证的是 8 MiB 提交成功、96 MiB 提交被拒绝，不是整机物理内存上限。

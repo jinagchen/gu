@@ -22,3 +22,5 @@ ctest --test-dir build/windows -C Release -R '^wal$' --output-on-failure
 本机 MSVC x64 的 CTest 全量回归在 Release 和 Debug 各通过 12/12 项。复现时使用 LF 检出的 ASCII 源码路径，并将测试进程的 `TEMP` 和 `TMP` 设为已存在的 ASCII 目录，以满足现有固定校验和及索引首建夹具的路径约束。
 
 仍待联调：Engine `Insert`/`Upsert` 的确认后可见、重启重放、重复恢复、恢复后续写，以及混合负载下的写入计数、资源上限与查询尾延迟。旧日志删除和 checkpoint 不由底层 writer 执行。
+
+当前交接门槛：以真实引擎收据与查询快照验证“同步 → 发布 → 确认”，不能用独立 WAL 单测代替动态验收。优先验证截断尾后的重放和续写，等清单发布与恢复故障测试通过再启用旧日志回收。[联调清单](project-status.md#下一步与退出条件)

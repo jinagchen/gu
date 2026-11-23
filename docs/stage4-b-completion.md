@@ -57,7 +57,7 @@ python tools/contracts/run-static-baseline.py --run-id stage4-static-001
 | 未计费元数据 | 20 045 字节，配置与 `environment.json` 一致 |
 | `evaluation.check` | `verdict=pass`，10 项检查全 pass，距离最大绝对误差 0.0 |
 
-`unbudgeted_metadata_bytes` 为 20 045：进程镜像、CRT、依赖库与分配器开销，没有计入 `memory.total_bytes` 的六段划分，按 EVAL-1.1 要求披露。
+`unbudgeted_metadata_bytes` 为 20 045，是 `DescribeIndex` 对索引格式元数据的估算，不是进程镜像、CRT、依赖库及分配器开销的实测总和。进程级峰值看独立 Job 工件。
 
 每个查询 26 310/60 ≈ 438 次 4 KiB 无缓冲读（`direct_reads=true`），约 1.71 MiB；`graph.bin` 的物理大小恰好 2 MiB，故单查询读放大达 50.9 倍。这解释了为什么召回是 1.000：候选预算远大于夹具规模，搜索几乎遍历了全部节点。**这个基线不能用来评价检索效率，也不能外推到真实规模。**
 
@@ -106,7 +106,7 @@ python tools/contracts/check-build.py --output build/build-contract
 5. **`job_runner` 与基准的输出目录约定互斥**。前者必须在子进程启动前创建指标文件，后者拒绝已存在的输出目录，EVAL-1.1 要求的"Job 证据在运行目录内"因此无法同时成立。改为基准只在自己将要写入时创建目录，且失败不留空目录。
 6. **`environment.json` 记录绝对路径**。改为运行目录相对路径，使证据可随目录搬迁。
 7. **清单 `adapter.native_version` 写的是适配器版本**。配置里 `native.native_version` 被要求存在却从未被读取，清单与报告都写成了 `1.0.0`，而实际底座是 DiskANN `0.6.1+4c31367`。为 `FirstBuildRequest` 增加 `native_version` 并贯通到清单与报告，同时校验两个字段不得矛盾。
-8. **`code_commit_at_configure` 为空字符串**。CMake 在无 git 元数据时补 `unavailable-no-git-metadata`，不再留空。本项目目录不是 git 仓库，该字段如实反映这一点。
+8. **`code_commit_at_configure` 为空字符串**。CMake 在使用无 Git 元数据的源码快照时补 `unavailable-no-git-metadata`，正常 Git 检出记录配置时的提交。
 9. **基准 CLI 仍期望 `--target engine` 返回 3**。真实目标接通后过期的断言，改为配置不完整时退出 2、索引打不开时退出 2 且不创建输出目录。
 
 ## 已知限制
@@ -114,26 +114,24 @@ python tools/contracts/check-build.py --output build/build-contract
 - **夹具规模小**。512 × 16 只够验证协议，不足以支撑任何性能或内存比例结论。召回 1.000 来自近乎全图扫描。
 - **写路径未实现**。`Insert`/`Upsert`/`Checkpoint` 返回 `unsupported`，动态运行、WAL 重放、后台合并不在本阶段范围，`writes.jsonl` 为空是设计结果。
 - **内存只验证了限额**。`memory_acceptance=not_evaluated`，Job 提交限额是调度限额，不是物理内存测量。
-- **单 worker、单线程**。未验证并发查询下的预算与 IO 调度。
-- **`code_dirty_at_configure` 在无 git 时写 false**，因为它必须是布尔且校验器不消费该字段；真实含义以 `code_commit_at_configure` 的 `unavailable-` 前缀为准。
+- **该基线为单 worker**。后续[第五阶段](stage5-a-completion.md)做了两个 worker 的静态读侧对照，规模化并发与混合读写仍待验证。
+- **`code_dirty_at_configure` 当前输出 `"true"` 或 `"false"` 字符串**。若 `code_commit_at_configure` 是 `unavailable-no-git-metadata`，不能从 `"false"` 推断源码没有修改。
 - **`build-report.json` 的 `adapter` 字段是硬编码常量**，与清单内容重复，未与 `FirstBuildRequest.adapter_name` 联动。
 
 ## 复现
 
-```text
+```powershell
 cmake -S . -B build/windows -G "Visual Studio 17 2022" -A x64
 cmake --build build/windows --config Release
 ctest --test-dir build/windows -C Release --output-on-failure
 
-python tools/contracts/check-build.py --output build/build-contract
-python tools/contracts/run-static-baseline.py --run-id stage4-static-001
-python tools/contracts/run-static-baseline.py --run-id stage4-static-002
-python tools/contracts/compare-runs.py \
-    --left runs/stage4-static-001 --right runs/stage4-static-002
+.\.venv\Scripts\python.exe tools/contracts/run-static-baseline.py --root D:/agent-io-runs --run-id stage4-static-001
+.\.venv\Scripts\python.exe tools/contracts/run-static-baseline.py --root D:/agent-io-runs --run-id stage4-static-002
+.\.venv\Scripts\python.exe tools/contracts/compare-runs.py --left D:/agent-io-runs/stage4-static-001 --right D:/agent-io-runs/stage4-static-002
 ```
 
-需要固定 Boost 头文件时才构建 `vector_bench`；`agent_io_index`、`agent_io_engine`、`vector_build` 与 `index_engine_test` 不依赖 Boost。
+`vector_bench` 需要固定 Boost 1.78 头文件；首建和引擎库不依赖 Boost。完整回归的 LF、ASCII 路径和临时目录设置见 [README](../README.md#开发环境)。
 
 ## 未完成
 
-第四阶段作为整体仍未验收：动态运行、增量段、后台合并、恢复与真实规模数据集属于后续阶段，B 侧下一轮应先在千级以上的夹具上复测召回与每查询 IO 量，再讨论效率结论。
+小规模静态闭环已经验收。静态检索效率与严格内存比例仍需正式规模数据验证；动态运行、增量段、恢复与后台合并按第六、七阶段验收。2026 年 11 月 23 日的干净构建与小夹具复测见[项目状态](project-status.md#本次复核)。

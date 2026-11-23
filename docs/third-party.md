@@ -1,6 +1,6 @@
 # 第三方依赖与许可证记录
 
-日期：2026 年 11 月 10 日。准确版本见 [依赖锁定](../configs/dependencies.lock.json)，Python 全部直接和传递依赖见 [requirements.lock.txt](../evaluation/requirements.lock.txt)。本表记录本地包中的许可证声明，不替代官方依赖准入要求 Q-09。
+建立日期：2026 年 11 月 10 日；2026 年 11 月 23 日同步实际运行依赖边界。准确版本见 [依赖锁定](../configs/dependencies.lock.json) 和 [Python 锁定](../evaluation/requirements.lock.txt)。本表不替代正式分发审查或官方依赖准入要求 Q-09。
 
 ## 项目许可与第三方材料
 
@@ -28,6 +28,6 @@ Python 其余包已全部固定版本；原始 wheel 和安装包中的许可证
 1. 删除 `use_medoids_data_as_centroids` 中的重复 scratch 借用，避免单线程加载死锁。
 2. 将 `SSDQueryScratch` 对单个 `new PQScratch` 的释放改为 `delete`。
 
-没有修改图构建、邻居选择和搜索算法。上游 Windows 读取器不直接作为项目生产读取器使用；提交失败、句柄管理及异步生命周期由后续正式适配负责。
+上述补丁没有修改上游图构建、邻居选择和搜索算法。当前 `vector_build` 和静态 Engine 实际使用项目自有 FORMAT-1 图及存储后端，不链接 DiskANN、MKL 或 OpenMP；固定上游及其运行库用于可选的 `diskann_probe` 和阶段二验证。`vector_bench` 单独复用 Boost 1.78 的 Boost.JSON 头文件；Python 依赖在离线评测中使用。WAL、CLOCK 与 IOCP 实现不新增第三方包。[当前实现与复现](project-status.md)
 
 首次运行脚本需要从 GitHub、NuGet 和 Python 包源下载。离线使用时，预先保留已锁定的源码及子模块、`build/diskann/packages`、NuGet 工具和 Python wheel 缓存，按锁定版本安装；仅保留可执行文件不足以重建。阶段二验证了联网构建流程，尚未演练完全断网重建。

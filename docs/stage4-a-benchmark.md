@@ -4,7 +4,7 @@
 
 ## 交付范围
 
-新增 `agent_io_benchmark` 静态库、`vector_bench` 命令和显式 `contract-test` 测试目标。A 的静态查询生产端已实现；正式 Engine 尚未链接，第四阶段整体仍未完成。合成目标的 ID、版本和距离用于验证输出，不是检索结果，不计算召回或宣称磁盘检索性能。
+本次历史交付新增 `agent_io_benchmark` 静态库、`vector_bench` 和显式 `contract-test` 目标。该目标用于合成输出验证，不提供检索或召回证据。真实 Engine 当时未链接，已在 2026 年 11 月 21 日接通，见[第四阶段 B](stage4-b-completion.md)；真实目标仍只支持静态查询。
 
 - [benchmark_runner.hpp](../include/agent_io/benchmark_runner.hpp)：运行参数、查询目标和日志接收接口、内存规划与运行报告。
 - [runner.cpp](../src/benchmark/runner.cpp)：开放式到达、并发执行、结果槽、日志线程、资源采样和排空。
@@ -82,7 +82,7 @@ MSVC C++20 自有代码以 `/W4 /WX /permissive- /EHsc` 编译通过。Release �
 
 ## B 侧接入
 
-B 可链接 `agent_io_benchmark`，实现 BenchmarkTarget 并提供 BenchmarkSink，调用 RunStaticBenchmark：
+下列是交付时的 B 侧接入清单；静态部分后来已实现，保留供查阅。动态生产端的状态见[项目状态](project-status.md)。
 
 1. 加载真实索引和查询，验证维度、有限数、唯一 ID、大小和实际 SHA256，输入及依赖 scratch 纳入预算。
 2. QueryId(row) 返回真实查询 ID；Search(row, options, output, stop) 使用稳定输入，向借用的预分配 span 写 Neighbor 并返回真实快照、代次和数量；不得保存该 span。

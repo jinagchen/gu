@@ -1,6 +1,8 @@
 # C++ 接口约定
 
-契约版本 API-1.2，日期 2026 年 11 月 11 日，对应 DESIGN-1.1 [总体设计](architecture.md)。1.1 确定 Windows IOCP；1.2 补充第三阶段 A 的 BlockReader、文件回收、预算模式、读取调度、WAL 编码与基准交接。新增 EngineOptions 字段和内部方法见 [A 侧契约](stage3-a-contract.md)。头文件仅有声明，没有可链接引擎实现。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
+契约版本 API-1.2，日期 2026 年 11 月 11 日，对应 DESIGN-1.1 [总体设计](architecture.md)。1.1 确定 Windows IOCP；1.2 补充第三阶段 A 的 BlockReader、文件回收、预算模式、读取调度、WAL 编码与基准交接。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
+
+截至 2026 年 11 月 23 日，`Engine` 可链接并支持静态 `Open`、`Search`、`Get`、`Stats`、`QuiesceReads` 和 `Close`。`Open` 独占 `LOCK` 并校验索引，不做 WAL 重放；`Insert`、`Upsert`、`Checkpoint` 固定返回 `unsupported`。下文的动态语义是冻结契约，不是已交付行为。[项目状态](project-status.md)
 
 ## 1 类型和返回值
 
@@ -39,7 +41,7 @@ write_effect 默认 none。只有写入可能进入 WAL 后的不可确定错误
 | Stats() | Result<EngineStats> | 有界计量快照；多计数非原子一致，不能代替查询视图 |
 | Close() | Result<Success> | 停新请求、排空、报告错误；重复成功关闭幂等 |
 
-索引首次创建由独立构建程序负责：输入、第三方参数、独立 Job 限额与 staging 发布规则见 [B 侧契约](stage3-b-contract.md) 与 [build-run.json](../configs/examples/build-run.json)，构建程序 `vector_build` 已于 2026 年 11 月 21 日实现，拒绝矩阵与已发布索引的独立复核见[第四阶段 B 交付](stage4-b-completion.md)。A 已规定构建受限域、文件发布和资源交接要求，见 [A 侧契约](stage3-a-contract.md)。没有 `flush` 歧义：写入同步由 Insert/Upsert 保证，Checkpoint 专指数据段与清单覆盖。没有删除、事务组和历史 Search API。
+索引首次创建由 `vector_build` 负责，输入参数、独立 Job 限额与 staging 发布规则见 [B 侧契约](stage3-b-contract.md)及 [build-run.json](../configs/examples/build-run.json)；拒绝矩阵见[第四阶段 B 交付](stage4-b-completion.md)。按目标契约，写入同步由 `Insert`/`Upsert` 保证，`Checkpoint` 专指数据段与清单覆盖；当前不能调用它们执行这些操作。没有删除、事务组和历史 Search API。
 
 Get 返回的 `version` 是该向量最后修改序号，`snapshot_sequence` 是操作读取的整体快照，两者不必相同。Search 的每个版本不得大于 S，且不得存在同一 ID 的更高可见版本。
 
@@ -95,7 +97,7 @@ ReadRequest 持有 FileLease 和 BufferLease，校验 `block.file_id == file.Id(
 | WalWriter::Sync | 同步所有此前追加的数据并返回状态；组提交由上层控制 |
 | WalWriter::Rotate / Close | 组边界同步后轮换、关闭；错误后禁止通过轮换绕过恢复 |
 
-BlockReader::ReadBatch 返回按输入排序的只读 BlockLease，TryPrefetch 非阻塞准入；FileRegistry 提供持有引用后的延迟回收；ResourceGovernor 负责带生命周期的内存预约与模式切换。详细所有权、计量与失败约束见 [A 侧契约](stage3-a-contract.md)。IndexAdapter、DeltaStore、候选扩展和快照内部类型以冻结的 INDEX-B-1.2 为准（[index.hpp](../include/agent_io/index.hpp)）：WriteSlot 显式接收全局序号，读取携带捕获的 DeltaPin，ScratchRequest 覆盖段数、预算及 PQ/导航上界。完整 Manifest 类型与逻辑读取/预取统计见 [B 侧契约](stage3-b-contract.md)。2026 年 11 月 17 日联合复核已完成，第三阶段设计冻结，依据见[冻结记录](stage3-freeze.md)；索引仍是声明，运行时验收另行完成。
+`BlockReader::ReadBatch` 返回按输入排序的只读块租约，`TryPrefetch` 非阻塞准入；文件引用与存储资源按 [A 侧契约](stage3-a-contract.md)管理。静态 `IndexAdapter`、`ScratchRequest` 计量和 Manifest 编解码已经实现。`DeltaStore`、`DeltaPin`、写入发布与跨代次回收按冻结的 [INDEX-B-1.2](stage3-b-contract.md) 实现和验收，尚无动态端到端运行。
 
 INDEX-B-1.1 的复审补充：ReadView/DeltaPin 为非所有权元数据，读取方法接收 ReadViewLease，由预先准备的生命周期对象固定段、增量和预算；未发布的最后预留槽可在 WAL 追加前 CancelLastSlot。Expand 显式接收 K，Refine 通过 RefinementRequest 接收租约、预算与同一查询期限；工作区包括两份重叠候选数组和导航上界。以上仅为声明，不是生命周期或并发实现验收。
 
@@ -107,7 +109,7 @@ BufferLease 的可写入口只供后端或填充者使用，缓存发布后只�
 
 ## 6 契约演进
 
-2026 年 11 月 17 日冻结组合：API-1.2 / STORAGE-A-1.1 / INDEX-B-1.2 / FORMAT-1 / EVAL-1.1，对应 DESIGN-1.1。清单此前未实现，本次首次固定完整 JSON schema；公开 API 与运行输出字段未变。2026 年 11 月 21 日 FORMAT-1 编解码、首建发布与静态 Engine 已按该冻结实现，公开声明未改。
+2026 年 11 月 17 日冻结组合：API-1.2 / STORAGE-A-1.1 / INDEX-B-1.2 / FORMAT-1 / EVAL-1.1，对应 DESIGN-1.1。11 月 21 日落地清单和段格式、首建发布、静态 Engine 及读优化；11 月 23 日另行交付 [WAL 编解码与 writer](stage6-a-wal.md)。本次状态同步不改变版本或字段语义。
 
 公开类型或语义改变时修改 API 版本并更新头文件、文档、基准与调用示例。单纯新增计数不改变已存在字段含义。阶段二若证实依赖无法走该读接口，先记录决策并修改契约，不在实现中绕过后仍声称符合设计。
 
