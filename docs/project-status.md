@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 1–3：需求、环境、设计 | [REQ-1.0](requirements.md) 与 22 项[验收条目](acceptance-matrix.md)；[本机工程可行性](stage2-completion.md)和[设计冻结](stage3-freeze.md)通过 | 官方平台、内存范围、正式数据和负载等[未决事项](open-questions.md) |
 | 4：静态基线 | `vector_build` 首建并发布自有 FORMAT-1 索引；`Engine` 校验、独占打开与静态 `Search`/`Get`；`vector_bench --target engine` 和 Python 离线评测闭环。[交付记录](stage4-b-completion.md) | 当前首建是小规模精确 kNN 构图，不是生产版 DiskANN/PQ；真实规模与超内存工作集未验 |
-| 5：读优化 | 有界 CLOCK、同块在途共享、Windows IOCP 和有界下一跳预取；十组静态消融。[交付记录](stage5-a-completion.md) | 正式规模、混合负载和稳定的预取尾延迟收益未验证 |
+| 5：读优化 | 有界 CLOCK、同块在途共享、Windows IOCP 和有界下一跳预取；十组静态消融。[A 交付记录](stage5-a-completion.md) · [B 独立复核与规模复测](stage5-b-completion.md)：十组读取量与命中率逐项复现，补测缓存/工作集 0.02–2.0 连续谱，发现有效缓存容量仅为标称值 45.07%，并补上读路径的消费端校验 | 正式规模、混合负载；预取在缓存装不下时无可测收益，机制已定位但未改善 |
 | 6：动态写入与恢复 | 底层 WAL 编解码、追加、刷盘、轮换；动态轨迹及独立校验用合成结果验证。[WAL 交付](stage6-a-wal.md) · [动态评测契约](stage3-b-contract.md#10-动态输入与轨迹) | `Engine::Insert`、`Upsert` 和 `Checkpoint` 返回 `unsupported`；`Open` 不做 WAL 重放，没有真实写入收据或动态召回 |
 | 7–8：合并和正式实验 | 有冻结协议和拟定负载矩阵 | 增量刷盘、合并、代次切换、旧文件回收、长期背压与正式评测仍待实现或执行 |
 | 9–11：提交、答辩和维护 | 公布的时间窗口和材料类别已登记 | 队伍提交记录与回执未核对；正式实验报告、进展汇报幻灯片和解说视频未在跟踪文件中发现 |
@@ -26,6 +26,19 @@
 | 缓存与预取对照 | 11 月 23 日复测的 10 组查询结果一致，Recall@10 均为 **1.000**。8 MiB 档 CLOCK 模式均只提交 512 次读取；IOCP + CLOCK + 预取的 47 个预取块均被消费，8 个在第一次需求到达时已就绪（仓库保留的交付批次为 7 个）。128 KiB 档未提交预取，缓存模式仍提交 26,126 次读取。 |
 
 复现入口见 [README](../README.md#开发环境)。本机复测工件位于 `D:/agent-io-doc-audit-20261123-135324/`，未纳入版本控制：静态提交峰值取自 `runs/static-001/job.json` 的 `kernel_peak_job_commit_bytes`；预取提前就绪数取自 `runs/read-compare-001/summary.json` 中 `resident / iocp-prefetch` 的 `prefetch_ready_at_demand`。仓库内的[第五阶段汇总](evidence/stage5-a/summary.json)保存的是历史交付批次。缓存降低的是引擎读取请求和完成字节，不是设备物理读；静态小夹具的召回、延迟和提交内存不能外推到正式规模。底层进程终止用例不证明 Engine 恢复或断电持久性。
+
+### B 侧读路径复核（2026 年 11 月 24 日）
+
+十组配置的读取次数与缓存命中率与 A 交付表逐项吻合（8 MiB 三条完全相同），延迟不可跨机比较。[B 交付记录](stage5-b-completion.md)
+
+补测 A 未覆盖的中间态：4096 节点、16 MiB 图，缓存从 256 KiB 扫到 32 MiB，比值 0.02–2.0，21 组全部通过两套校验。两条结论需要后续处理：
+
+1. **有效缓存容量只有标称值的 45.07%**。每 4 KiB 块实际扣减约 9088 字节预算，因为 `AllocateReadBuffer` 把对齐量按整块 4096 字节计入预约。`memory.cache_bytes` 与可用数据容量的换算因此偏离名义值一倍，A 侧需确认是有意保守还是疏漏。缓存/图比值为 1.0 时命中率仅 50.74%。
+2. **预取在缓存装不下工作集时无可测收益**。五个窗口的读次数差 7 次，P95 在 45–71 ms 无趋势抖动；`prefetch_ready_at_demand` 在同一配置三次运行为 7/8/2，只能证明通道工作，不能论证收益。
+
+同时补齐 `read_path` 的消费端校验（`evaluation.check` 不打开 `summary.json`），并记录 `max_queries` 需随 worker 数与后端延迟调整。
+
+复核中另修掉一处影响回归可信度的缺口：`build_contract` 把工作区放在构建树内，检出路径含中文时首建按 FORMAT-1 拒绝非 ASCII 输入路径，该用例因此在中文路径下必然失败，此前被当作环境限制记录下来。现在脚本在目标路径非 ASCII 时自动把用例工作区移到 ASCII 临时目录并把报告回抄，`ctest` 在本仓库路径下由 11/12 变为 **12/12**，28 个用例与断言不变；引擎的 ASCII 约束本身没有放宽。
 
 ## 下一步与退出条件
 
