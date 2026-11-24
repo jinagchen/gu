@@ -1,0 +1,987 @@
+{
+  "runs": [
+    {
+      "run": "resident-sync",
+      "policy": "disabled",
+      "backend": "synchronous",
+      "cache_bytes": 8388608,
+      "block_bytes": 4096,
+      "hits": 0,
+      "misses": 26310,
+      "demands": 26310,
+      "hit_rate": 0.0,
+      "read_calls": 26247,
+      "completed_bytes": 107507712,
+      "completed_to_demand_byte_ratio": 0.9976054732041049,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 2,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "resident-sync-clock",
+      "policy": "clock",
+      "backend": "synchronous",
+      "cache_bytes": 8388608,
+      "block_bytes": 4096,
+      "hits": 25798,
+      "misses": 512,
+      "demands": 26310,
+      "hit_rate": 0.9805397187381224,
+      "read_calls": 512,
+      "completed_bytes": 2097152,
+      "completed_to_demand_byte_ratio": 0.019460281261877613,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 2,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "resident-iocp",
+      "policy": "disabled",
+      "backend": "windows_iocp",
+      "cache_bytes": 8388608,
+      "block_bytes": 4096,
+      "hits": 0,
+      "misses": 26310,
+      "demands": 26310,
+      "hit_rate": 0.0,
+      "read_calls": 26285,
+      "completed_bytes": 107663360,
+      "completed_to_demand_byte_ratio": 0.9990497909540099,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 16,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "resident-iocp-clock",
+      "policy": "clock",
+      "backend": "windows_iocp",
+      "cache_bytes": 8388608,
+      "block_bytes": 4096,
+      "hits": 25798,
+      "misses": 512,
+      "demands": 26310,
+      "hit_rate": 0.9805397187381224,
+      "read_calls": 512,
+      "completed_bytes": 2097152,
+      "completed_to_demand_byte_ratio": 0.019460281261877613,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 8,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "policy": "clock",
+      "backend": "windows_iocp",
+      "cache_bytes": 8388608,
+      "block_bytes": 4096,
+      "hits": 25800,
+      "misses": 510,
+      "demands": 26310,
+      "hit_rate": 0.9806157354618016,
+      "read_calls": 512,
+      "completed_bytes": 2097152,
+      "completed_to_demand_byte_ratio": 0.019460281261877613,
+      "prefetch_submitted": 47,
+      "prefetch_consumed": 47,
+      "prefetch_ready_at_demand": 2,
+      "peak_inflight_reads": 8,
+      "peak_prefetch_reads": 8,
+      "failed_checks": 0
+    },
+    {
+      "run": "tight-sync",
+      "policy": "disabled",
+      "backend": "synchronous",
+      "cache_bytes": 131072,
+      "block_bytes": 4096,
+      "hits": 0,
+      "misses": 26310,
+      "demands": 26310,
+      "hit_rate": 0.0,
+      "read_calls": 26285,
+      "completed_bytes": 107663360,
+      "completed_to_demand_byte_ratio": 0.9990497909540099,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 2,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "tight-sync-clock",
+      "policy": "clock",
+      "backend": "synchronous",
+      "cache_bytes": 131072,
+      "block_bytes": 4096,
+      "hits": 312,
+      "misses": 25998,
+      "demands": 26310,
+      "hit_rate": 0.01185860889395667,
+      "read_calls": 25920,
+      "completed_bytes": 106168320,
+      "completed_to_demand_byte_ratio": 0.9851767388825542,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 2,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "tight-iocp",
+      "policy": "disabled",
+      "backend": "windows_iocp",
+      "cache_bytes": 131072,
+      "block_bytes": 4096,
+      "hits": 0,
+      "misses": 26310,
+      "demands": 26310,
+      "hit_rate": 0.0,
+      "read_calls": 26304,
+      "completed_bytes": 107741184,
+      "completed_to_demand_byte_ratio": 0.9997719498289623,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 12,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "tight-iocp-clock",
+      "policy": "clock",
+      "backend": "windows_iocp",
+      "cache_bytes": 131072,
+      "block_bytes": 4096,
+      "hits": 184,
+      "misses": 26126,
+      "demands": 26310,
+      "hit_rate": 0.006993538578487267,
+      "read_calls": 26126,
+      "completed_bytes": 107012096,
+      "completed_to_demand_byte_ratio": 0.9930064614215127,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 9,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "policy": "clock",
+      "backend": "windows_iocp",
+      "cache_bytes": 131072,
+      "block_bytes": 4096,
+      "hits": 192,
+      "misses": 26118,
+      "demands": 26310,
+      "hit_rate": 0.007297605473204105,
+      "read_calls": 26113,
+      "completed_bytes": 106958848,
+      "completed_to_demand_byte_ratio": 0.9925123527175979,
+      "prefetch_submitted": 0,
+      "prefetch_consumed": 0,
+      "prefetch_ready_at_demand": 0,
+      "peak_inflight_reads": 12,
+      "peak_prefetch_reads": 0,
+      "failed_checks": 0
+    }
+  ],
+  "checks": [
+    {
+      "run": "resident-sync",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 0 <= cache_bytes 8388608"
+    },
+    {
+      "run": "resident-sync",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 2 <= max_inflight_reads 64"
+    },
+    {
+      "run": "resident-sync",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "resident-sync",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 6416 <= total_bytes 268435456"
+    },
+    {
+      "run": "resident-sync",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 26247 <= misses 26310 + prefetch 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 107507712 <= demands 107765760"
+    },
+    {
+      "run": "resident-sync",
+      "name": "disabled_cache_publishes_no_hit",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_hits 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "disabled_cache_publishes_no_resident",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_resident_bytes 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "sync_backend_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "io_backend synchronous but prefetch_submitted 0"
+    },
+    {
+      "run": "resident-sync",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "resident-sync",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 2113536 <= cache_bytes 8388608"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 2 <= max_inflight_reads 64"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 4960016 <= total_bytes 268435456"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 512 <= misses 512 + prefetch 0"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 2097152 <= demands 107765760"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "sync_backend_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "io_backend synchronous but prefetch_submitted 0"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "resident-sync-clock",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 0 <= cache_bytes 8388608"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 16 <= max_inflight_reads 64"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 15736 <= total_bytes 268435456"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 26285 <= misses 26310 + prefetch 0"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 107663360 <= demands 107765760"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "disabled_cache_publishes_no_hit",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_hits 0"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "disabled_cache_publishes_no_resident",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_resident_bytes 0"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "resident-iocp",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 2113536 <= cache_bytes 8388608"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 8 <= max_inflight_reads 64"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 4969336 <= total_bytes 268435456"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 512 <= misses 512 + prefetch 0"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 2097152 <= demands 107765760"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "resident-iocp-clock",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 2113536 <= cache_bytes 8388608"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 8 <= max_inflight_reads 64"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 8 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 4969336 <= total_bytes 268435456"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 2 <= consumed 47"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 47 <= submitted 47"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 8 <= submitted 47"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 512 <= misses 510 + prefetch 47"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 2097152 <= demands 107765760"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "resident-iocp-prefetch",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "tight-sync",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 0 <= cache_bytes 131072"
+    },
+    {
+      "run": "tight-sync",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 2 <= max_inflight_reads 64"
+    },
+    {
+      "run": "tight-sync",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "tight-sync",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 6416 <= total_bytes 268435456"
+    },
+    {
+      "run": "tight-sync",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 26285 <= misses 26310 + prefetch 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 107663360 <= demands 107765760"
+    },
+    {
+      "run": "tight-sync",
+      "name": "disabled_cache_publishes_no_hit",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_hits 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "disabled_cache_publishes_no_resident",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_resident_bytes 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "sync_backend_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "io_backend synchronous but prefetch_submitted 0"
+    },
+    {
+      "run": "tight-sync",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "tight-sync",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 57344 <= cache_bytes 131072"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 2 <= max_inflight_reads 64"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 140816 <= total_bytes 268435456"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 25920 <= misses 25998 + prefetch 0"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 106168320 <= demands 107765760"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "sync_backend_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "io_backend synchronous but prefetch_submitted 0"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "tight-sync-clock",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 0 <= cache_bytes 131072"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 12 <= max_inflight_reads 64"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 15736 <= total_bytes 268435456"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 26304 <= misses 26310 + prefetch 0"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 107741184 <= demands 107765760"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "disabled_cache_publishes_no_hit",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_hits 0"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "disabled_cache_publishes_no_resident",
+      "status": "pass",
+      "detail": "cache_policy disabled but cache_resident_bytes 0"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "tight-iocp",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 57344 <= cache_bytes 131072"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 9 <= max_inflight_reads 64"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 150136 <= total_bytes 268435456"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 26126 <= misses 26126 + prefetch 0"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 107012096 <= demands 107765760"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "zero_window_publishes_no_prefetch",
+      "status": "pass",
+      "detail": "prefetch_blocks 0 but prefetch_submitted 0"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "tight-iocp-clock",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "cache_resident_within_budget",
+      "status": "pass",
+      "detail": "resident 57344 <= cache_bytes 131072"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "inflight_within_cap",
+      "status": "pass",
+      "detail": "peak 12 <= max_inflight_reads 64"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "prefetch_within_cap",
+      "status": "pass",
+      "detail": "peak 0 <= max_prefetch_reads 16"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "accounted_within_total",
+      "status": "pass",
+      "detail": "accounted 150136 <= total_bytes 268435456"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "prefetch_ready_le_consumed",
+      "status": "pass",
+      "detail": "ready 0 <= consumed 0"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "prefetch_consumed_le_submitted",
+      "status": "pass",
+      "detail": "consumed 0 <= submitted 0"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "prefetch_within_window_peak",
+      "status": "pass",
+      "detail": "peak_prefetch 0 <= submitted 0"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "reads_bounded_by_misses_and_prefetch",
+      "status": "pass",
+      "detail": "submitted 26113 <= misses 26118 + prefetch 0"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "completed_bytes_bounded_by_demands",
+      "status": "pass",
+      "detail": "completed 106958848 <= demands 107765760"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "no_read_errors",
+      "status": "pass",
+      "detail": "io_read_errors 0 in a measurement run"
+    },
+    {
+      "run": "tight-iocp-prefetch",
+      "name": "demands_positive",
+      "status": "pass",
+      "detail": "logical block demands = 26310"
+    }
+  ],
+  "failed_checks": 0
+}
