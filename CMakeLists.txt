@@ -138,8 +138,10 @@ if(EXISTS "${AGENT_IO_TEST_PYTHON}")
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/test-stage3-b.py")
     add_test(NAME stage3_manifest_contract COMMAND "${AGENT_IO_TEST_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/test-stage3-freeze.py")
+    add_test(NAME stage5_read_path_checks COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/storage/test-verify-read-path.py")
     set_tests_properties(stage3_b_contracts stage3_b_regressions stage3_manifest_contract
-        PROPERTIES TIMEOUT 60)
+        stage5_read_path_checks PROPERTIES TIMEOUT 60)
 endif()
 add_test(NAME benchmark_runner COMMAND benchmark_runner_test)
 set_tests_properties(benchmark_runner PROPERTIES TIMEOUT 30)

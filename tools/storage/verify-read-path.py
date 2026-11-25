@@ -9,9 +9,9 @@ bug in the engine cannot also silence the check.
 Invariants fall into three groups:
 
 * budget: a statistic may not exceed the budget the configuration declared.
-* conservation: prefetch and read counters must obey their own ordering.
-* coupling: a disabled feature must publish zero, and read bytes must not
-  exceed the logical block demands that produced them.
+* conservation: prefetch counters must obey their ordering, and completed
+  bytes must agree with the number of submitted fixed-size reads.
+* coupling: a disabled feature must publish zero.
 
 Exit code is 0 when every invariant holds, 1 when any fails.
 """
@@ -83,6 +83,9 @@ def verify(run):
     read_errors = u(counts["io_read_errors"], "engine_counters.io_read_errors")
     prefetch_submitted = u(counts["prefetch_submitted"], "engine_counters.prefetch_submitted")
     prefetch_consumed = u(counts["prefetch_consumed"], "engine_counters.prefetch_consumed")
+    incomplete = counters["run_incomplete"]
+    if not isinstance(incomplete, bool):
+        raise ValueError("counters.run_incomplete must be a boolean")
 
     # --- budget -----------------------------------------------------------
     report.require("cache_resident_within_budget", resident <= cache_bytes,
@@ -107,9 +110,19 @@ def verify(run):
     report.require("reads_bounded_by_misses_and_prefetch",
                    submitted <= misses + prefetch_submitted,
                    f"submitted {submitted} <= misses {misses} + prefetch {prefetch_submitted}")
-    report.require("completed_bytes_bounded_by_demands",
-                   completed_bytes <= (hits + misses) * block_bytes,
-                   f"completed {completed_bytes} <= demands {(hits + misses) * block_bytes}")
+    # The static benchmark drains at both ends of the measurement interval.
+    # Each submission is one block, including prefetches never used by a demand.
+    submitted_bytes = submitted * block_bytes
+    if not incomplete and read_errors == 0:
+        report.require("completed_bytes_match_submitted_blocks",
+                       completed_bytes == submitted_bytes,
+                       f"completed {completed_bytes} == {submitted} reads * {block_bytes} bytes "
+                       f"({submitted_bytes})")
+    else:
+        report.require("completed_bytes_bounded_by_submitted_blocks",
+                       completed_bytes <= submitted_bytes,
+                       f"completed {completed_bytes} <= {submitted} reads * {block_bytes} bytes "
+                       f"({submitted_bytes})")
 
     # --- coupling ---------------------------------------------------------
     if policy == "disabled":
