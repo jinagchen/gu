@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "purpose": "stage6_b_dynamic_closure",
+  "fixture": {
+    "vectors": 4096,
+    "dimension": 16,
+    "queries_per_run": 10,
+    "k": 10,
+    "seed": 20261125,
+    "frame_bytes": 136
+  },
+  "runs": [
+    {
+      "run": "writes-00050",
+      "writes": 50,
+      "write_acknowledge_ns": {
+        "p50": 2129000,
+        "p95": 4045800,
+        "p99": 10097200,
+        "max": 10097200,
+        "total": 123058300
+      },
+      "visible_read_ns": {
+        "p50": 9300,
+        "p95": 31800,
+        "p99": 83500,
+        "max": 83500,
+        "total": 698900
+      },
+      "query_ns": {
+        "p50": 57195100,
+        "p95": 78896500,
+        "p99": 78896500,
+        "max": 78896500,
+        "total": 510611400
+      },
+      "open_ns": 60231800,
+      "reopen_ns": 26087700,
+      "second_process_open_ns": 40432500,
+      "first_sequence": 1,
+      "last_sequence": 50,
+      "wal_bytes_written": 6800,
+      "wal_bytes_per_write": 136.0,
+      "delta_resident_bytes": 1376256,
+      "live_vectors": 4146
+    },
+    {
+      "run": "writes-00200",
+      "writes": 200,
+      "write_acknowledge_ns": {
+        "p50": 2118500,
+        "p95": 2538400,
+        "p99": 4066000,
+        "max": 13366300,
+        "total": 445127100
+      },
+      "visible_read_ns": {
+        "p50": 9900,
+        "p95": 29400,
+        "p99": 35100,
+        "max": 35500,
+        "total": 2474600
+      },
+      "query_ns": {
+        "p50": 48147200,
+        "p95": 68339100,
+        "p99": 68339100,
+        "max": 68339100,
+        "total": 438948400
+      },
+      "open_ns": 64102000,
+      "reopen_ns": 30094600,
+      "second_process_open_ns": 38610000,
+      "first_sequence": 1,
+      "last_sequence": 200,
+      "wal_bytes_written": 27200,
+      "wal_bytes_per_write": 136.0,
+      "delta_resident_bytes": 1376256,
+      "live_vectors": 4296
+    },
+    {
+      "run": "writes-00800",
+      "writes": 800,
+      "write_acknowledge_ns": {
+        "p50": 2131300,
+        "p95": 2452000,
+        "p99": 2673100,
+        "max": 12723600,
+        "total": 1745100400
+      },
+      "visible_read_ns": {
+        "p50": 9500,
+        "p95": 30600,
+        "p99": 41100,
+        "max": 103900,
+        "total": 10152800
+      },
+      "query_ns": {
+        "p50": 49183100,
+        "p95": 72097500,
+        "p99": 72097500,
+        "max": 72097500,
+        "total": 423749400
+      },
+      "open_ns": 64590000,
+      "reopen_ns": 30267100,
+      "second_process_open_ns": 37113500,
+      "first_sequence": 1,
+      "last_sequence": 800,
+      "wal_bytes_written": 108800,
+      "wal_bytes_per_write": 136.0,
+      "delta_resident_bytes": 1376256,
+      "live_vectors": 4896
+    }
+  ],
+  "checks": [
+    {
+      "run": "writes-00050",
+      "writes": 50,
+      "ack_p50_ms": 2.129,
+      "ack_p95_ms": 4.0458,
+      "ack_p99_ms": 10.0972,
+      "visible_p50_ms": 0.0093,
+      "reopen_ms": 26.0877
+    },
+    {
+      "run": "writes-00200",
+      "writes": 200,
+      "ack_p50_ms": 2.1185,
+      "ack_p95_ms": 2.5384,
+      "ack_p99_ms": 4.066,
+      "visible_p50_ms": 0.0099,
+      "reopen_ms": 30.0946
+    },
+    {
+      "run": "writes-00800",
+      "writes": 800,
+      "ack_p50_ms": 2.1313,
+      "ack_p95_ms": 2.452,
+      "ack_p99_ms": 2.6731,
+      "visible_p50_ms": 0.0095,
+      "reopen_ms": 30.2671
+    }
+  ],
+  "failed_checks": 0
+}
