@@ -45,6 +45,7 @@ Copyright 2026 proj47-RecallFlow contributors.
 - [第四阶段 A 交付](docs/stage4-a-storage.md)：同步存储与并发基准生产端。
 - [第四阶段 B 交付](docs/stage4-b-completion.md)：真实索引适配、首次构建、静态 Engine、真实基准目标与评测闭环；含静态基线结果、重复运行对比与已知限制。
 - [第五阶段 A 交付](docs/stage5-a-completion.md)：有界 CLOCK 缓存、同块在途合并、Windows IOCP、下一跳预取和静态对照结果。
+- [第五阶段 B 交付](docs/stage5-b-completion.md)：十组对照的独立复核、4096 节点上的缓存/工作集连续谱、有效缓存容量为标称值 45.07% 的记账偏差，以及 `read_path` 的消费端校验。
 - [第六阶段 A：WAL 底层](docs/stage6-a-wal.md)：FORMAT-1 编解码、顺序追加、刷盘、轮换和故障验证；待接入 Engine 动态写入与恢复。
 
 公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 已按声明实现静态查询路径并能链接，写路径返回 `unsupported`；同步存储已有独立实现。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
@@ -94,7 +95,7 @@ docs/                 设计、实验方法和相关工作
 1. 已完成阶段二：固定 DiskANN 0.6.1 提交及补丁，跑通小规模构建、加载和静态查询。
 2. 已交付阶段四 A 侧同步存储和静态基准生产端，分别通过小数据探针和合成目标检查。
 3. 已将 `IndexAdapter`、`vector_build` 和静态 `Engine` 接入 `vector_bench`，Python 独立计算 Recall@10，并复核内存与重复运行证据。
-4. 已完成第五阶段 A 的静态读路径对照，记录缓存、IOCP 与预取对读取量、延迟及资源的影响。
+4. 已完成第五阶段 A 的静态读路径对照，记录缓存、IOCP 与预取对读取量、延迟及资源的影响；B 已独立复核并补测缓存/工作集连续谱，见[第五阶段 B 交付](docs/stage5-b-completion.md)。
 5. 第六阶段 A 已实现 WAL 底层；动态写入、查询可见性和恢复仍待 A/B 联调。
 
 动态评测使用对应数据版本的真实答案；在线后台合并属于第七阶段。
@@ -107,7 +108,7 @@ docs/                 设计、实验方法和相关工作
 
 ### 完整测试的前置条件
 
-- **使用 ASCII 路径。** 建议把源码检出到 `D:\agent-io`，并使用只含 ASCII 字符的构建、运行和临时目录。含中文等非 ASCII 字符的路径传给首建时，可能报 `Input paths must be ASCII`。在运行下方命令前，先创建 `D:\agent-io-tmp`，并在当前 PowerShell 中将 `TEMP` 和 `TMP` 都设为该目录。
+- **使用 ASCII 路径。** 建议把源码检出到 `D:\agent-io`，并使用只含 ASCII 字符的构建、运行和临时目录。含中文等非 ASCII 字符的路径传给首建时，可能报 `Input paths must be ASCII`。`build_contract` 例外：目标路径非 ASCII 时它会把用例工作区移到 ASCII 临时目录，因此不因检出目录名失败；显式传 `--output` 的其他脚本仍需 ASCII 输出目录。在运行下方命令前，先创建 `D:\agent-io-tmp`，并在当前 PowerShell 中将 `TEMP` 和 `TMP` 都设为该目录。
 - **使用 LF 检出。** `.gitattributes` 默认以 LF 检出文本，标记为 `-text` 的历史工件和补丁保留原始字节。已有工作副本可用 `git ls-files --eol -- evaluation/examples/stage3-b/trace.jsonl` 检查是否为 `w/lf`；如果看到 `w/crlf` 或测试报 `Checksum mismatch: trace.jsonl`，请将包含此规则的版本重新检出到新的 ASCII 目录，保留原工作副本中的未提交改动。
 
 在已加载 Visual Studio 工具环境的 PowerShell 中运行：
@@ -127,9 +128,11 @@ Python 侧校验命令（使用 `.venv` 中的解释器）：
 .\.venv\Scripts\python.exe tools/contracts/test-stage3-b.py
 .\.venv\Scripts\python.exe tools/contracts/run-static-baseline.py --root D:/agent-io-runs --run-id static-001
 .\.venv\Scripts\python.exe tools/storage/run-stage5.py --output D:/agent-io-runs/read-compare-001
+.\.venv\Scripts\python.exe tools/storage/run-stage5-b.py --output D:/agent-io-runs/read-sweep-001 --vectors 4096
+.\.venv\Scripts\python.exe tools/storage/verify-read-path.py --run D:/agent-io-runs/read-sweep-001/sweep-16384kib-synchronous
 ```
 
-前两条检查配置、协议反例和动态评测回归。后两条默认使用 `build/windows/Release` 的基准程序，输出须使用新目录（静态基线允许空目录）。`run-static-baseline.py` 在 Job 限额内完成首建、测量与离线评测；`run-stage5.py` 做五种读模式、两种缓存预算的对照。单独运行 `evaluation.check` 会重写目标目录的 `evaluation.json`；复查受版本控制的示例时请先复制到临时目录。退出 0 只表示工件完整且已计分，是否达标另查 `verdict`；退出 1 为无效，2 为不计召回的 `incomplete` 或 `requires_review`。
+前两条检查配置、协议反例和动态评测回归。中间三条默认使用 `build/windows/Release` 的基准程序，输出须使用新目录（静态基线允许空目录）。`run-static-baseline.py` 在 Job 限额内完成首建、测量与离线评测；`run-stage5.py` 做五种读模式、两种缓存预算的对照；`run-stage5-b.py` 在一个装不下缓存的较大图上扫缓存与预取窗口；`verify-read-path.py` 校验 `summary.json` 的读路径统计，可对任意运行目录重复执行。单独运行 `evaluation.check` 会重写目标目录的 `evaluation.json`；复查受版本控制的示例时请先复制到临时目录。退出 0 只表示工件完整且已计分，是否达标另查 `verdict`；退出 1 为无效，2 为不计召回的 `incomplete` 或 `requires_review`。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import shutil
 import struct
@@ -68,6 +69,26 @@ def dump(path, value):
     # because the configuration's own hash is part of the evidence chain.
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8", newline="\n")
+
+
+def is_ascii_path(path):
+    """FORMAT-1 refuses non-ASCII dataset paths, so a workspace has to be ASCII."""
+    try:
+        str(path).encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def temporary_workspace():
+    """Return an ASCII scratch directory even when TEMP itself is not ASCII."""
+    candidate = Path(tempfile.mkdtemp(prefix="build-contract-")).resolve()
+    if is_ascii_path(candidate):
+        return candidate
+    shutil.rmtree(candidate, ignore_errors=True)
+    root = Path(os.environ.get("SystemDrive", "C:") + os.sep) / "agent-io-build-contract"
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="run-", dir=root)).resolve()
 
 
 def write_vectors(path, count, dimension, seed):
@@ -269,22 +290,34 @@ def main(argv=None):
             print(f"missing executable: {path}", file=sys.stderr)
             return 2
 
+    evidence_dir = None
     if arguments.output:
-        workspace = arguments.output.resolve()
+        evidence_dir = arguments.output.resolve()
         # Re-running the suite must be idempotent, but a build refuses to write
         # into an index that already exists. Clear our own previous workspace
         # and nothing else: refuse to touch a directory that does not carry the
         # markers this script writes.
-        if workspace.exists() and any(workspace.iterdir()):
+        if evidence_dir.exists() and any(evidence_dir.iterdir()):
             markers = ("build-contract.json", "published")
-            if not any((workspace / marker).exists() for marker in markers):
-                print(f"refusing to clear {workspace}: it is not a contract workspace",
+            if not any((evidence_dir / marker).exists() for marker in markers):
+                print(f"refusing to clear {evidence_dir}: it is not a contract workspace",
                       file=sys.stderr)
                 return 2
-            shutil.rmtree(workspace)
-        workspace.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(evidence_dir)
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    # ctest asks for the evidence directory next to the build tree, so the path
+    # inherits whatever the checkout is called. The producer rejects non-ASCII
+    # dataset paths by design, which would make this suite pass or fail on the
+    # name of the parent folder rather than on the contract. Run the cases in an
+    # ASCII workspace and copy the report back instead.
+    if evidence_dir is not None and is_ascii_path(evidence_dir):
+        workspace = evidence_dir
     else:
-        workspace = Path(tempfile.mkdtemp(prefix="build-contract-")).resolve()
+        workspace = temporary_workspace()
+        if evidence_dir is not None:
+            print(f"note: {evidence_dir} is not an ASCII path, so the cases run in "
+                  f"{workspace} and the report is copied back", file=sys.stderr)
     dataset = workspace / "dataset"
     dataset.mkdir(exist_ok=True)
     vectors = dataset / "base.f32"
@@ -489,6 +522,9 @@ def main(argv=None):
         ],
     }
     dump(workspace / "build-contract.json", evidence)
+    if evidence_dir is not None and evidence_dir != workspace:
+        shutil.copyfile(workspace / "build-contract.json",
+                        evidence_dir / "build-contract.json")
     print(json.dumps({"cases_passed": len(cases), "workspace": str(workspace)},
                      ensure_ascii=False, indent=2))
     return 0
