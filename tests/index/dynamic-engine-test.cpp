@@ -1,9 +1,8 @@
 // Stage 6 B checks: durable writes, snapshot visibility, recovery and the
 // refusal paths that must not leave a half-applied record behind.
 //
-// The acceptance condition is narrow on purpose: an acknowledged write is
-// visible to the next query, a newer version hides the older one, and a restart
-// replays exactly the writes that were acknowledged -- no more, no fewer.
+// Confirmed writes must survive restart, and complete frames can also be
+// recovered when the caller never received a receipt.
 
 #include "agent_io/engine.hpp"
 #include "agent_io/index.hpp"
@@ -11,6 +10,7 @@
 
 #include "../../src/index/builder.hpp"
 #include "../../src/index/format.hpp"
+#include "../../src/index/recovery.hpp"
 
 #include <windows.h>
 
@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -42,7 +43,7 @@ void Require(bool condition, const char* message) {
     }
 }
 
-const Error* AsError(const Result<Success>& result) {
+template<class T> const Error* AsError(const Result<T>& result) {
     return std::holds_alternative<Error>(result) ? &std::get<Error>(result) : nullptr;
 }
 
@@ -192,6 +193,142 @@ std::vector<std::filesystem::path> WalFiles(const Fixture& fixture) {
     std::sort(paths.begin(), paths.end());
     return paths;
 }
+
+constexpr VectorId kTailConfirmed = 930001;
+constexpr VectorId kTailTorn = 930002;
+constexpr VectorId kTailContinued = 930003;
+constexpr DWORD kTailChildExit = 43;
+const std::vector<float> kFirstValues(8, 0.25f);
+const std::vector<float> kNextValues(8, 0.75f);
+
+bool HasVector(Engine& engine, VectorId id, Sequence version, const std::vector<float>& values) {
+    const auto result = engine.Get(id);
+    const auto* vector = std::get_if<StoredVector>(&result);
+    return vector && vector->id == id && vector->version == version && vector->values == values;
+}
+
+bool HasReceipt(const Result<WriteReceipt>& result, VectorId id, Sequence sequence) {
+    const auto* receipt = std::get_if<WriteReceipt>(&result);
+    return receipt && receipt->id == id && receipt->sequence == sequence;
+}
+
+bool AppendFramePrefix(const std::filesystem::path& path, Sequence sequence, VectorId id,
+                       const std::vector<float>& values, std::size_t missing) {
+    std::vector<std::byte> frame(static_cast<std::size_t>(
+        std::get<std::uint64_t>(WalFrameBytes(static_cast<std::uint32_t>(values.size())))));
+    if (AsError(EncodeWalFrame({WalOperation::insert, sequence, id, values}, frame)) ||
+        frame.size() <= missing) return false;
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    output.write(reinterpret_cast<const char*>(frame.data()),
+                 static_cast<std::streamsize>(frame.size() - missing));
+    output.close();
+    return static_cast<bool>(output);
+}
+
+std::string ReadBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    Require(static_cast<bool>(input), "read test fixture file");
+    return {std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+}
+
+auto WalContents(const Fixture& fixture) {
+    std::vector<std::pair<std::filesystem::path, std::string>> contents;
+    for (const auto& path : WalFiles(fixture)) contents.emplace_back(path, ReadBytes(path));
+    return contents;
+}
+
+InstanceId FixtureInstance(const Fixture& fixture) {
+    return std::get<CurrentRecord>(DecodeCurrent(ReadBytes(fixture.index / "CURRENT"))).instance_id;
+}
+
+std::filesystem::path WriteWalHeader(const Fixture& fixture, const char* name,
+                                     InstanceId instance, Sequence start) {
+    const auto path = fixture.index / "wal" / name;
+    std::filesystem::create_directories(path.parent_path());
+    std::array<std::byte, wal_detail::kWalHeaderBytes> header{};
+    Require(!AsError(EncodeWalFileHeader({instance, start}, header)), "encode fixture WAL header");
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(header.data()),
+                 static_cast<std::streamsize>(header.size()));
+    output.close();
+    Require(static_cast<bool>(output), "write fixture WAL header");
+    return path;
+}
+
+void ExpectUnchangedCorruption(const Fixture& fixture, const EngineOptions& options) {
+    const auto before = WalContents(fixture);
+    const auto opened = Engine::Open(fixture.index, options);
+    Require(AsError(opened) && AsError(opened)->code == ErrorCode::corruption,
+            "invalid WAL history must fail Open with corruption");
+    Require(WalContents(fixture) == before, "rejected WAL files remain byte-for-byte identical");
+}
+
+enum class NativeFault { none, seek, truncate, flush, publish, attach, kill_on_recovery_flush,
+                         kill_after_frame_flush };
+NativeFault g_wal_fault = NativeFault::none;
+unsigned g_wal_seeks = 0, g_wal_truncates = 0, g_wal_flushes = 0;
+constexpr DWORD kRecoveryCrashExit = 44;
+constexpr DWORD kUnrepliedCrashExit = 45;
+
+BOOL WINAPI TestWalSeek(HANDLE file, LARGE_INTEGER offset, PLARGE_INTEGER result, DWORD mode) {
+    ++g_wal_seeks;
+    if (g_wal_fault != NativeFault::seek) return SetFilePointerEx(file, offset, result, mode);
+    SetLastError(ERROR_SEEK);
+    return FALSE;
+}
+
+BOOL WINAPI TestWalTruncate(HANDLE file) {
+    ++g_wal_truncates;
+    if (g_wal_fault != NativeFault::truncate) return SetEndOfFile(file);
+    SetLastError(ERROR_DISK_FULL);
+    return FALSE;
+}
+
+BOOL WINAPI TestWalFlush(HANDLE file) {
+    ++g_wal_flushes;
+    if (g_wal_fault == NativeFault::flush) {
+        SetLastError(ERROR_WRITE_FAULT);
+        return FALSE;
+    }
+    if (g_wal_fault == NativeFault::kill_on_recovery_flush && g_wal_truncates == 1)
+        TerminateProcess(GetCurrentProcess(), kRecoveryCrashExit);
+    const auto result = FlushFileBuffers(file);
+    if (result && g_wal_fault == NativeFault::kill_after_frame_flush && g_wal_flushes == 2)
+        TerminateProcess(GetCurrentProcess(), kUnrepliedCrashExit);
+    return result;
+}
+
+BOOL WINAPI TestWalPublish(LPCWSTR pending, LPCWSTR target, DWORD flags) {
+    if (g_wal_fault != NativeFault::publish) return MoveFileExW(pending, target, flags);
+    SetLastError(ERROR_ACCESS_DENIED);
+    return FALSE;
+}
+
+HANDLE WINAPI TestWalOpen(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES attr,
+                          DWORD disposition, DWORD flags, HANDLE templ) {
+    if (g_wal_fault != NativeFault::attach || disposition != OPEN_EXISTING)
+        return CreateFileW(path, access, share, attr, disposition, flags, templ);
+    SetLastError(ERROR_SHARING_VIOLATION);
+    return INVALID_HANDLE_VALUE;
+}
+
+struct WalFaultScope {
+    wal_detail::NativeIo prior = wal_detail::CurrentNativeIo();
+    explicit WalFaultScope(NativeFault fault) {
+        g_wal_fault = fault;
+        g_wal_seeks = g_wal_truncates = g_wal_flushes = 0;
+        auto& io = wal_detail::CurrentNativeIo();
+        io.seek = TestWalSeek;
+        io.truncate = TestWalTruncate;
+        io.flush = TestWalFlush;
+        io.publish = TestWalPublish;
+        io.open = TestWalOpen;
+    }
+    ~WalFaultScope() {
+        wal_detail::CurrentNativeIo() = prior;
+        g_wal_fault = NativeFault::none;
+    }
+};
 
 void TestConfirmThenVisible() {
     auto fixture = Prepare("visible");
@@ -441,49 +578,261 @@ void TestRecoveryLiveCountCountsIds() {
     }
 }
 
-void TestTruncatedTailIsDiscarded() {
-    auto fixture = Prepare("truncated");
-    Sequence confirmed = 0;
-    {
-        auto engine = OpenFixture(fixture, Options());
-        if (!engine) return;
-        for (std::uint32_t index = 0; index < 4; ++index) {
-            const auto receipt = engine->Insert(930000 + index, VectorFor(fixture, index),
-                                                WriteOptions{});
-            Require(std::holds_alternative<WriteReceipt>(receipt), "truncation fixture write");
-            if (std::holds_alternative<WriteReceipt>(receipt))
-                confirmed = std::get<WriteReceipt>(receipt).sequence;
-        }
-        static_cast<void>(engine->Close());
+int TailRecoveryChild(const char* index_path) {
+    auto opened = Engine::Open(index_path, Options());
+    auto* engine = std::get_if<std::unique_ptr<Engine>>(&opened);
+    if (!engine) return 2;
+    const auto stats = (*engine)->Stats();
+    if (!HasVector(**engine, kTailConfirmed, 1, kFirstValues) ||
+        std::get<EngineStats>(stats).published_sequence != 1 ||
+        !std::holds_alternative<Error>((*engine)->Get(kTailTorn))) return 3;
+    if (!HasReceipt((*engine)->Insert(kTailContinued, kNextValues, {}), kTailContinued, 2))
+        return 4;
+    TerminateProcess(GetCurrentProcess(), kTailChildExit);
+    return 5;
+}
+
+DWORD RunTerminatingChild(const Fixture& fixture, const wchar_t* mode) {
+    wchar_t executable[MAX_PATH]{};
+    const auto length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return 0;
+    auto command = L"\"" + std::wstring(executable) + L"\" " + mode + L" \"" +
+        fixture.index.wstring() + L"\"";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    if (!CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &startup, &child)) return 0;
+    CloseHandle(child.hThread);
+    DWORD code = 0;
+    if (WaitForSingleObject(child.hProcess, 10000) == WAIT_OBJECT_0) {
+        GetExitCodeProcess(child.hProcess, &code);
+    } else {
+        TerminateProcess(child.hProcess, 1);
+        WaitForSingleObject(child.hProcess, 5000);
     }
+    CloseHandle(child.hProcess);
+    return code;
+}
 
-    const auto files = WalFiles(fixture);
-    Require(!files.empty(), "the truncation fixture has a WAL file");
-    if (files.empty()) return;
-    std::error_code error;
-    const auto size = std::filesystem::file_size(files.back(), error);
-    Require(!error && size > 20, "the WAL file has a writable tail");
-    if (error || size <= 20) return;
-    // Lop off half of the last frame: this is the shape of a process that died
-    // mid-write. The record was never acknowledged, so it must not come back.
-    std::filesystem::resize_file(files.back(), size - 12, error);
-    Require(!error, "the last WAL frame can be truncated");
-
+void TestTornTailThenConfirmedWriteSurvivesAnotherOpen() {
+    auto fixture = Prepare("tail-continue");
     {
         auto engine = OpenFixture(fixture, Options());
         if (!engine) return;
-        const auto stats = engine->Stats();
-        if (std::holds_alternative<EngineStats>(stats)) {
-            Require(std::get<EngineStats>(stats).published_sequence == confirmed - 1,
-                    "a torn tail drops exactly the unacknowledged record");
-            Require(std::get<EngineStats>(stats).live_vectors == fixture.count + 3,
-                    "the discarded record does not count as live");
+        Require(HasReceipt(engine->Insert(kTailConfirmed, kFirstValues, {}), kTailConfirmed, 1),
+                "the first record is acknowledged before simulating a torn append");
+    }
+    const auto files = WalFiles(fixture);
+    Require(files.size() == 1, "one WAL holds the acknowledged record");
+    if (files.size() != 1) return;
+    Require(AppendFramePrefix(files.front(), 2, kTailTorn, kNextValues, 12),
+            "append only a legal prefix of the unacknowledged frame");
+    const auto exit_code = RunTerminatingChild(fixture, L"--tail-recovery-child");
+    Require(exit_code == kTailChildExit,
+            "first recovery restores sequence 1, then acknowledges sequence 2 before forced exit");
+    if (exit_code != kTailChildExit) return;
+
+    auto engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    Require(HasVector(*engine, kTailConfirmed, 1, kFirstValues), "first receipt survives");
+    Require(HasVector(*engine, kTailContinued, 2, kNextValues), "second receipt survives");
+    Require(std::holds_alternative<Error>(engine->Get(kTailTorn)), "torn ID is still absent");
+    Require(HasReceipt(engine->Insert(930004, kFirstValues, {}), 930004, 3),
+            "second recovery continues at sequence 3");
+}
+
+void TestEmptyLatestWalIsAdopted() {
+    for (const bool torn : {false, true}) {
+        auto fixture = Prepare(torn ? "first-frame-torn" : "empty-wal");
+        const auto path = WriteWalHeader(fixture, "empty.log", FixtureInstance(fixture), 1);
+        const auto header = ReadBytes(path);
+        if (torn) Require(AppendFramePrefix(path, 1, kTailTorn, kFirstValues, 12),
+                          "append a prefix of the first frame");
+        for (int pass = 0; pass < 2; ++pass) {
+            auto engine = OpenFixture(fixture, Options());
+            if (!engine) return;
+            Require(std::get<EngineStats>(engine->Stats()).published_sequence == 0,
+                    "an empty WAL does not advance the snapshot");
         }
-        Require(std::holds_alternative<Error>(engine->Get(930003)),
-                "the discarded record is not visible");
-        Require(std::holds_alternative<StoredVector>(engine->Get(930002)),
-                "the acknowledged records before the tear survive");
-        static_cast<void>(engine->Close());
+        Require(WalFiles(fixture) == std::vector{path} && ReadBytes(path) == header,
+                "repeated opens preserve the one empty header");
+        {
+            auto engine = OpenFixture(fixture, Options());
+            if (!engine) return;
+            Require(HasReceipt(engine->Insert(kTailConfirmed, kFirstValues, {}), kTailConfirmed, 1),
+                    "the adopted WAL receives its first frame");
+        }
+        Require(WalFiles(fixture) == std::vector{path}, "the original file was adopted");
+        auto engine = OpenFixture(fixture, Options());
+        if (!engine) return;
+        Require(HasVector(*engine, kTailConfirmed, 1, kFirstValues), "adopted WAL replays");
+        Require(std::holds_alternative<Error>(engine->Get(kTailTorn)), "torn first ID never appears");
+    }
+}
+
+void TestRotatedEmptyWalIsAdopted() {
+    auto fixture = Prepare("rotated-torn");
+    auto options = Options();
+    options.wal.max_frame_bytes = 104;
+    options.wal.rotation_bytes = 64 + 104;
+    {
+        WalFaultScope fault(NativeFault::none);
+        auto engine = OpenFixture(fixture, options);
+        if (!engine) return;
+        Require(HasReceipt(engine->Insert(kTailConfirmed, kFirstValues, {}), kTailConfirmed, 1),
+                "first frame fills the WAL up to the rotation limit");
+        g_wal_fault = NativeFault::attach;
+        const auto failure = engine->Insert(kTailTorn, kFirstValues, {});
+        Require(AsError(failure) && AsError(failure)->code == ErrorCode::io_error &&
+                AsError(failure)->system_error == ERROR_SHARING_VIOLATION &&
+                AsError(failure)->write_effect == WriteEffect::none,
+                "rotation fails before a frame if the published log cannot be attached");
+        g_wal_fault = NativeFault::none;
+        const auto refused = engine->Insert(kTailContinued, kNextValues, {});
+        Require(AsError(refused) && AsError(refused)->code == ErrorCode::recovery_required,
+                "rotation attachment failure blocks writes until recovery");
+    }
+    const auto files = WalFiles(fixture);
+    Require(files.size() == 2, "one empty log was published by rotation");
+    if (files.size() != 2) return;
+    const auto original = ReadBytes(files.front());
+    const auto header = ReadBytes(files.back());
+    Require(header.size() == wal_detail::kWalHeaderBytes, "rotated log contains only its header");
+    Require(AppendFramePrefix(files.back(), 2, kTailTorn, kFirstValues, 72),
+            "append a 32-byte first frame prefix to the rotated WAL");
+    {
+        auto engine = OpenFixture(fixture, options);
+        if (!engine) return;
+    }
+    Require(WalFiles(fixture) == files && ReadBytes(files.back()) == header,
+            "first frame in the rotated file is repaired back to the same header");
+    {
+        auto engine = OpenFixture(fixture, options);
+        if (!engine) return;
+        Require(HasReceipt(engine->Insert(kTailContinued, kNextValues, {}), kTailContinued, 2),
+                "continued sequence 2 is written into the rotated WAL");
+    }
+    Require(WalFiles(fixture) == files && ReadBytes(files.front()) == original,
+            "continuation retains both original files and leaves the older one unchanged");
+    auto engine = OpenFixture(fixture, options);
+    if (!engine) return;
+    Require(HasVector(*engine, kTailConfirmed, 1, kFirstValues) &&
+            HasVector(*engine, kTailContinued, 2, kNextValues),
+            "both confirmed frames replay across rotation");
+}
+
+void TestRecoveryIoFailuresAndRetry() {
+    auto fixture = Prepare("tail-retry");
+    {
+        auto engine = OpenFixture(fixture, Options());
+        if (!engine) return;
+        Require(HasReceipt(engine->Insert(kTailConfirmed, kFirstValues, {}), kTailConfirmed, 1),
+                "repair fixture has a confirmed prefix");
+    }
+    const auto clean = WalContents(fixture);
+    if (clean.size() != 1) return;
+    const auto& path = clean.front().first;
+    Require(AppendFramePrefix(path, 2, kTailTorn, kNextValues, 12), "simulate a torn append");
+    const auto torn = WalContents(fixture);
+    const auto too_small = Engine::Open(fixture.index, Options(0));
+    Require(AsError(too_small) && AsError(too_small)->code == ErrorCode::resource_exhausted &&
+            WalContents(fixture) == torn, "budget failure occurs before tail repair");
+
+    const auto fails = [&](NativeFault fault, DWORD native, unsigned seeks,
+                           unsigned truncates, unsigned flushes) {
+        WalFaultScope injection(fault);
+        const auto opened = Engine::Open(fixture.index, Options());
+        const auto* error = AsError(opened);
+        Require(error && error->code == ErrorCode::io_error &&
+                error->system_error == static_cast<int>(native),
+                "Open reports the injected native error and returns no engine");
+        Require(g_wal_seeks == seeks && g_wal_truncates == truncates && g_wal_flushes == flushes,
+                "repair fails at the intended I/O step");
+    };
+    fails(NativeFault::seek, ERROR_SEEK, 1, 0, 0);
+    Require(WalContents(fixture) == torn, "seek failure leaves all bytes untouched");
+    fails(NativeFault::truncate, ERROR_DISK_FULL, 1, 1, 0);
+    Require(WalContents(fixture) == torn, "truncate failure leaves all bytes untouched");
+    fails(NativeFault::flush, ERROR_WRITE_FAULT, 1, 1, 1);
+    Require(WalContents(fixture) == clean, "truncation succeeded even though its flush failed");
+    fails(NativeFault::flush, ERROR_WRITE_FAULT, 0, 0, 1);
+    Require(WalContents(fixture) == clean, "recovery retries the flush at the clean length");
+
+    Require(AppendFramePrefix(path, 2, kTailTorn, kNextValues, 12), "restore the torn append");
+    Require(RunTerminatingChild(fixture, L"--truncate-child") == kRecoveryCrashExit,
+            "child is killed after truncating and before flushing");
+    Require(WalContents(fixture) == clean, "process exit leaves a WAL at the repaired length");
+    fails(NativeFault::flush, ERROR_WRITE_FAULT, 0, 0, 1);
+    WalFaultScope injection(NativeFault::none);
+    auto engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    Require(g_wal_flushes == 1 && g_wal_truncates == 0, "successful Open syncs the clean length");
+    Require(HasVector(*engine, kTailConfirmed, 1, kFirstValues) &&
+            HasReceipt(engine->Insert(kTailContinued, kNextValues, {}), kTailContinued, 2),
+            "successful retry restores the confirmed prefix and permits the next write");
+}
+
+int RecoveryFaultChild(const char* index_path, NativeFault fault) {
+    WalFaultScope injection(fault);
+    auto opened = Engine::Open(index_path, Options());
+    if (auto* engine = std::get_if<std::unique_ptr<Engine>>(&opened);
+        engine && fault == NativeFault::kill_after_frame_flush)
+        static_cast<void>((*engine)->Insert(kTailConfirmed, kFirstValues, {}));
+    return 2;
+}
+
+void TestCompleteUnrepliedFrameReplays() {
+    auto fixture = Prepare("unreplied");
+    Require(RunTerminatingChild(fixture, L"--unreplied-child") == kUnrepliedCrashExit,
+            "child is killed inside a successful frame flush before returning the receipt");
+    auto engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    Require(HasVector(*engine, kTailConfirmed, 1, kFirstValues),
+            "a complete synced frame with no returned receipt is replayed");
+    Require(HasReceipt(engine->Insert(kTailContinued, kNextValues, {}), kTailContinued, 2),
+            "writer continues after replaying the unreplied frame");
+}
+
+void TestNewWalPublicationFailures() {
+    for (const NativeFault mode : {NativeFault::publish, NativeFault::attach}) {
+        const bool published = mode == NativeFault::attach;
+        auto fixture = Prepare(published ? "attach-failure" : "rename-failure");
+        {
+            WalFaultScope injection(mode);
+            auto engine = OpenFixture(fixture, Options());
+            if (!engine) return;
+            const auto rejected = engine->Insert(kTailConfirmed, kFirstValues, {});
+            Require(AsError(rejected) && AsError(rejected)->code == ErrorCode::io_error &&
+                    AsError(rejected)->write_effect == WriteEffect::none &&
+                    AsError(rejected)->system_error ==
+                        (published ? ERROR_SHARING_VIOLATION : ERROR_ACCESS_DENIED),
+                    "publication or attachment failure returns its native error without applying");
+            Require(std::get<EngineStats>(engine->Stats()).published_sequence == 0 &&
+                    std::holds_alternative<Error>(engine->Get(kTailConfirmed)),
+                    "failed publication never publishes the record in memory");
+            g_wal_fault = NativeFault::none;
+            const auto next = engine->Insert(kTailContinued, kNextValues, {});
+            Require(AsError(next) && AsError(next)->code == ErrorCode::recovery_required,
+                    "same engine cannot create a second WAL after uncertain creation");
+        }
+        const auto files = WalFiles(fixture);
+        Require(files.size() == (published ? 1u : 0u), "only successful renames expose a .log");
+        if (published && files.size() == 1)
+            Require(std::filesystem::file_size(files.front()) == wal_detail::kWalHeaderBytes,
+                    "no business frame was appended before attaching the log");
+        const auto partial = fixture.index / "wal" / "short.pending";
+        std::ofstream(partial, std::ios::binary).put('A');
+        {
+            auto engine = OpenFixture(fixture, Options());
+            if (!engine) return;
+            Require(HasReceipt(engine->Insert(kTailContinued, kNextValues, {}), kTailContinued, 1),
+                    "reopen ignores pending files and resumes at sequence 1");
+        }
+        const auto final = WalFiles(fixture);
+        Require(final.size() == 1 && (!published || final == files),
+                "reopen adopts any already-published empty log without duplication");
+        Require(ReadBytes(partial) == "A", "recovery leaves the pending file untouched");
     }
 }
 
@@ -577,10 +926,7 @@ void TestCorruptFrameIsRefused() {
         file.flush();
     }
 
-    const auto opened = Engine::Open(fixture.index, Options());
-    Require(std::holds_alternative<Error>(opened) &&
-            std::get<Error>(opened).code == ErrorCode::corruption,
-            "a corrupted WAL frame fails the open instead of losing records silently");
+    ExpectUnchangedCorruption(fixture, Options());
 }
 
 // Rotation happens only between synchronised groups, so a short tail in an
@@ -613,10 +959,96 @@ void TestHistoricalShortTailIsRefused() {
     std::filesystem::resize_file(files.front(), size - 10, error);
     Require(!error, "the historical WAL file can be truncated");
 
-    const auto opened = Engine::Open(fixture.index, options);
-    Require(std::holds_alternative<Error>(opened) &&
-            std::get<Error>(opened).code == ErrorCode::corruption,
-            "a short tail in a non-final WAL file is reported as corruption");
+    ExpectUnchangedCorruption(fixture, options);
+}
+
+void TestInvalidHistoryRemainsUnchanged() {
+    for (const std::string_view scenario : {"foreign", "gap", "duplicate", "bad-tail-sequence",
+                                            "bad-tail-crc", "leading-gap", "short-header"}) {
+        auto fixture = Prepare(std::string(scenario));
+        const auto instance = FixtureInstance(fixture);
+        if (scenario == "leading-gap") {
+            const auto path = WriteWalHeader(fixture, "leading.log", instance, 2);
+            Require(AppendFramePrefix(path, 2, kTailTorn, kNextValues, 0),
+                    "leading sequence gap has a fully valid frame");
+        } else {
+            {
+                auto engine = OpenFixture(fixture, Options());
+                if (!engine) return;
+                Require(HasReceipt(engine->Insert(kTailConfirmed, kFirstValues, {}),
+                                   kTailConfirmed, 1), "invalid-history fixture has a good prefix");
+            }
+            const auto files = WalFiles(fixture);
+            if (files.size() != 1) return;
+            if (scenario == "bad-tail-sequence" || scenario == "bad-tail-crc") {
+                const bool wrong_sequence = scenario == "bad-tail-sequence";
+                Require(AppendFramePrefix(files.front(), wrong_sequence ? 3 : 2, kTailTorn,
+                                          kNextValues, wrong_sequence ? 79 : 7),
+                        "append a prefix containing one sequence or CRC byte");
+                if (!wrong_sequence) {
+                    const auto bytes = ReadBytes(files.front());
+                    std::fstream file(files.front(), std::ios::in | std::ios::out | std::ios::binary);
+                    file.seekp(-1, std::ios::end);
+                    file.put(static_cast<char>(bytes.back() ^ 1));
+                    file.close();
+                    Require(static_cast<bool>(file), "corrupt the first present CRC byte");
+                }
+            } else {
+                auto identity = instance;
+                if (scenario == "foreign") identity.front() ^= std::byte{1};
+                const Sequence start = scenario == "duplicate" ? 1 : (scenario == "gap" ? 3 : 2);
+                const auto path = WriteWalHeader(fixture, "invalid.log", identity, start);
+                if (scenario == "short-header") {
+                    std::filesystem::resize_file(path, 31);
+                } else {
+                    Require(AppendFramePrefix(path, start, kTailTorn, kNextValues, 12),
+                            "invalid history also contains a candidate incomplete tail");
+                }
+            }
+        }
+        ExpectUnchangedCorruption(fixture, Options());
+    }
+}
+
+void TestScanToRepairRevalidation() {
+    for (const std::string_view change : {"identity", "length", "header"}) {
+        auto fixture = Prepare("revalidate-" + std::string(change));
+        const auto instance = FixtureInstance(fixture);
+        const auto path = WriteWalHeader(fixture, "tail.log", instance, 1);
+        Require(AppendFramePrefix(path, 1, kTailTorn, kFirstValues, 12), "create repairable tail");
+        const auto before_scan = WalContents(fixture);
+        const auto options = Options();
+        const auto scanned = ScanWalDirectory(path.parent_path(), instance, fixture.dimension,
+                                              0, options.wal);
+        const auto* report = std::get_if<RecoveryReport>(&scanned);
+        Require(report && report->latest &&
+                report->latest->valid_bytes == wal_detail::kWalHeaderBytes &&
+                report->latest->file.scanned_bytes == before_scan.front().second.size(),
+                "scan returns the validated target and exact truncation offset");
+        Require(WalContents(fixture) == before_scan, "scan alone never changes the WAL");
+        if (!report || !report->latest) return;
+        if (change == "identity") {
+            auto displaced = path;
+            displaced.replace_extension(".displaced");
+            std::filesystem::rename(path, displaced);
+            std::filesystem::copy_file(displaced, path);
+        } else if (change == "length") {
+            std::ofstream(path, std::ios::app | std::ios::binary).put('A');
+        } else {
+            const auto bytes = ReadBytes(path);
+            std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+            file.put(static_cast<char>(bytes.front() ^ 1));
+        }
+        const auto after_change = WalContents(fixture);
+        WalFaultScope injection(NativeFault::none);
+        const auto& plan = *report->latest;
+        const auto repaired = wal_detail::FinishWalRecovery(plan.file, plan.valid_bytes, plan.header,
+                                                             fixture.dimension, options.wal);
+        Require(AsError(repaired) && AsError(repaired)->code == ErrorCode::io_error &&
+                AsError(repaired)->system_error == ERROR_INVALID_DATA &&
+                g_wal_truncates == 0 && g_wal_flushes == 0 && WalContents(fixture) == after_change,
+                "repair rejects a changed identity, size, or header before writing");
+    }
 }
 
 // Readers run while writes publish. Every result must be consistent with the
@@ -805,6 +1237,12 @@ void TestProcessCrashRecovery() {
 int main(int argc, char** argv) {
     if (argc >= 4 && std::string(argv[1]) == "--crash-child")
         return CrashChild(argv[2], std::atoi(argv[3]));
+    if (argc == 3 && std::string(argv[1]) == "--tail-recovery-child")
+        return TailRecoveryChild(argv[2]);
+    if (argc == 3 && std::string(argv[1]) == "--truncate-child")
+        return RecoveryFaultChild(argv[2], NativeFault::kill_on_recovery_flush);
+    if (argc == 3 && std::string(argv[1]) == "--unreplied-child")
+        return RecoveryFaultChild(argv[2], NativeFault::kill_after_frame_flush);
 
     TestConfirmThenVisible();
     TestVersionsAndConflict();
@@ -812,9 +1250,16 @@ int main(int argc, char** argv) {
     TestConcurrentQueriesAndWrites();
     TestRecoveryReplaysConfirmedWrites();
     TestRecoveryLiveCountCountsIds();
-    TestTruncatedTailIsDiscarded();
+    TestTornTailThenConfirmedWriteSurvivesAnotherOpen();
+    TestEmptyLatestWalIsAdopted();
+    TestRotatedEmptyWalIsAdopted();
+    TestRecoveryIoFailuresAndRetry();
+    TestCompleteUnrepliedFrameReplays();
+    TestNewWalPublicationFailures();
     TestCorruptFrameIsRefused();
     TestHistoricalShortTailIsRefused();
+    TestInvalidHistoryRemainsUnchanged();
+    TestScanToRepairRevalidation();
     TestRefusals();
     TestDeltaCapacityIsEnforced();
     TestUnsupportedCheckpointIsExplicit();

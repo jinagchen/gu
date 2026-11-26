@@ -2,13 +2,12 @@
 
 #include <algorithm>
 #include <cstring>
-#include <fstream>
+#include <limits>
 
 namespace agent_io {
 namespace {
 
-constexpr std::size_t kHeaderBytes = 64;
-constexpr std::uint64_t kMaxWalFileBytes = std::uint64_t{1} << 32;
+constexpr auto kHeaderBytes = wal_detail::kWalHeaderBytes;
 
 Error Corrupt(std::string message) {
     return Error{ErrorCode::corruption, std::move(message)};
@@ -23,25 +22,18 @@ bool AllZero(const InstanceId& value) {
                        [](std::byte byte) { return byte == std::byte{}; });
 }
 
-Result<std::vector<std::byte>> ReadWalFile(const std::filesystem::path& path) {
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
-    if (error) return Error{ErrorCode::io_error, "Cannot stat WAL file: " + path.string()};
-    if (size > kMaxWalFileBytes)
-        return Corrupt("WAL file exceeds the supported recovery size: " + path.string());
-    if (size < kHeaderBytes)
-        return Corrupt("WAL file is shorter than its header: " + path.string());
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return Error{ErrorCode::io_error, "Cannot open WAL file: " + path.string()};
-    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
-    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
-    if (!input) return Error{ErrorCode::io_error, "Cannot read WAL file: " + path.string()};
-    return bytes;
+bool MatchesSequencePrefix(std::span<const std::byte> frame, Sequence expected) {
+    constexpr std::size_t kSequenceOffset = 24;
+    for (std::size_t i = 0; i < sizeof(expected) && kSequenceOffset + i < frame.size(); ++i) {
+        if (frame[kSequenceOffset + i] != static_cast<std::byte>((expected >> (8 * i)) & 0xffu))
+            return false;
+    }
+    return expected != 0;
 }
 
 struct WalFile {
     WalFileHeader header{};
-    std::vector<std::byte> bytes;
+    wal_detail::ScannedWalFile scanned;
     std::string name;
 };
 
@@ -67,23 +59,20 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
     }
 
     std::vector<std::filesystem::path> paths;
-    for (const auto& entry : std::filesystem::directory_iterator(wal_directory, error)) {
-        if (error) return Error{ErrorCode::io_error, "Cannot list the WAL directory"};
-        if (!entry.is_regular_file(error) || error) continue;
-        const auto name = entry.path().filename().string();
-        if (name.size() < 5 || name.compare(name.size() - 4, 4, ".log") != 0) continue;
-        paths.push_back(entry.path());
+    std::filesystem::directory_iterator entry(wal_directory, error), end;
+    for (; !error && entry != end; entry.increment(error)) {
+        if (entry->path().extension() == L".log") paths.push_back(entry->path());
     }
+    if (error) return Error{ErrorCode::io_error, "Cannot list the WAL directory", error.value()};
 
     std::vector<WalFile> files;
     files.reserve(paths.size());
     for (const auto& path : paths) {
-        auto bytes = ReadWalFile(path);
-        if (const auto* failure = std::get_if<Error>(&bytes)) return *failure;
+        auto scanned = wal_detail::ReadWalForRecovery(path);
+        if (const auto* failure = std::get_if<Error>(&scanned)) return *failure;
         WalFile file;
-        file.bytes = std::get<std::vector<std::byte>>(std::move(bytes));
-        auto header = DecodeWalFileHeader(
-            std::span<const std::byte>(file.bytes.data(), kHeaderBytes));
+        file.scanned = std::get<wal_detail::ScannedWalFile>(std::move(scanned));
+        auto header = DecodeWalFileHeader(file.scanned.snapshot.encoded_header);
         if (const auto* failure = std::get_if<Error>(&header)) return *failure;
         file.header = std::get<WalFileHeader>(header);
         file.name = path.filename().string();
@@ -105,8 +94,10 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
     if (files.empty()) return report;
 
     Sequence expected = files.front().header.start_sequence;
+    if (expected > checkpoint_sequence && expected - checkpoint_sequence != 1)
+        return Corrupt("WAL history has a gap after the checkpoint");
     for (std::size_t file_index = 0; file_index < files.size(); ++file_index) {
-        const auto& file = files[file_index];
+        auto& file = files[file_index];
         if (file.header.start_sequence != expected)
             return Corrupt("WAL files do not continue each other at sequence " +
                            std::to_string(file.header.start_sequence));
@@ -114,9 +105,9 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
         WalFileSummary summary;
         summary.name = file.name;
         summary.start_sequence = file.header.start_sequence;
-        summary.file_bytes = file.bytes.size();
+        summary.file_bytes = file.scanned.bytes.size();
 
-        const std::span<const std::byte> content(file.bytes);
+        const std::span<const std::byte> content(file.scanned.bytes);
         std::size_t offset = kHeaderBytes;
         while (offset < content.size()) {
             auto decoded = DecodeWalFrame(content.subspan(offset), dimension,
@@ -129,6 +120,8 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
                 // means acknowledged bytes were lost.
                 if (!is_final)
                     return Corrupt("Non-final WAL file ends inside a frame: " + file.name);
+                if (!MatchesSequencePrefix(content.subspan(offset), expected))
+                    return Corrupt("Incomplete WAL frame does not match the next sequence");
                 summary.discarded_tail_bytes = content.size() - offset;
                 report.discarded_tail_bytes += summary.discarded_tail_bytes;
                 break;
@@ -136,7 +129,8 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
             if (frame.sequence != expected)
                 return Corrupt("WAL sequence is not contiguous at " +
                                std::to_string(frame.sequence));
-            expected = frame.sequence + 1;
+            expected = frame.sequence == (std::numeric_limits<Sequence>::max)()
+                           ? 0 : frame.sequence + 1;
             summary.highest_sequence = frame.sequence;
             ++summary.frames;
             offset += static_cast<std::size_t>(frame.consumed_bytes);
@@ -157,6 +151,14 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
         summary.bytes_read = offset;
         if (summary.highest_sequence > report.highest_sequence)
             report.highest_sequence = summary.highest_sequence;
+        if (is_final) {
+            const auto recovered = (std::max)(report.highest_sequence, checkpoint_sequence);
+            if (offset == kHeaderBytes &&
+                (file.header.start_sequence <= recovered ||
+                 file.header.start_sequence - recovered != 1))
+                return Corrupt("Empty latest WAL does not start at the next sequence");
+            report.latest = LatestWalRecovery{std::move(file.scanned.snapshot), file.header, offset};
+        }
         report.files.push_back(std::move(summary));
     }
     return report;

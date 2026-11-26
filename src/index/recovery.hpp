@@ -11,16 +11,18 @@
 // * which records still need replaying above the checkpoint sequence.
 //
 // The rules are deliberately asymmetric. The newest file may end in a partial
-// frame: that is a write that was never acknowledged, so dropping it is the
-// only safe reading. An older file may not, because rotation only happens
-// between synchronised groups, so a short tail there means bytes were lost
-// after they had been promised durable.
+// frame: that is a write that was never acknowledged. The read-only scan
+// records where the caller can repair it. Since rotation happens between
+// synchronised groups, a short tail in an older file means durable bytes
+// were lost.
 
 #include "agent_io/engine.hpp"
 #include "agent_io/index.hpp"
 #include "agent_io/storage.hpp"
+#include "../storage/wal_native.hpp"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -44,6 +46,12 @@ struct ReplayedRecord {
     std::vector<float> values;
 };
 
+struct LatestWalRecovery {
+    wal_detail::WalFileSnapshot file;
+    WalFileHeader header;
+    std::uint64_t valid_bytes = 0;
+};
+
 struct RecoveryReport {
     std::vector<WalFileSummary> files;
     std::vector<ReplayedRecord> records;
@@ -51,6 +59,7 @@ struct RecoveryReport {
     Sequence highest_sequence = 0;
     std::uint64_t discarded_tail_bytes = 0;
     std::uint64_t ignored_checkpointed_records = 0;
+    std::optional<LatestWalRecovery> latest;
 };
 
 // Scans `wal_directory` for files of `instance_id` and returns the records that

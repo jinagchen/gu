@@ -171,18 +171,21 @@ Result<DecodedWalFrame> DecodeWalFrame(Bytes input, std::uint32_t expected_dimen
         !Matches(input, 40, 4, expected_dimension) || !Matches(input, 44, 4, 0) ||
         !Matches(input, 48, 8, payload_size) || !Matches(input, 56, 8, 0))
         return Corrupt("Invalid FORMAT-1 WAL frame header");
-    if (input.size() < size)
+    const auto frame = input.first((std::min)(input.size(), static_cast<std::size_t>(size)));
+    const auto crc_offset = kHeaderBytes + static_cast<std::size_t>(payload_size);
+    if ((frame.size() > crc_offset &&
+         !Matches(frame, crc_offset, kCrcBytes, Crc32c(frame.first(crc_offset)))) ||
+        (frame.size() > crc_offset + kCrcBytes &&
+         !AllZero(frame.subspan(crc_offset + kCrcBytes))))
+        return Corrupt("WAL frame checksum or padding is invalid");
+    const auto payload_end = (std::min)(frame.size(), crc_offset);
+    for (std::size_t i = kHeaderBytes; i + kFloatBytes <= payload_end; i += kFloatBytes)
+        if (!IsFiniteBits(static_cast<std::uint32_t>(Get(frame, i, kFloatBytes))))
+            return Corrupt("WAL frame payload is not finite float32");
+    if (frame.size() < size)
         return DecodedWalFrame{WalDecodeStatus::need_more, {}, 0, 0, 0, {}, 0};
 
-    const auto frame = input.first(static_cast<std::size_t>(size));
-    const auto crc_offset = kHeaderBytes + static_cast<std::size_t>(payload_size);
-    if (Get(frame, crc_offset, kCrcBytes) != Crc32c(frame.first(crc_offset)) ||
-        !AllZero(frame.subspan(crc_offset + kCrcBytes)))
-        return Corrupt("WAL frame checksum or padding is invalid");
     const auto payload = frame.subspan(kHeaderBytes, static_cast<std::size_t>(payload_size));
-    for (std::size_t i = 0; i < payload.size(); i += kFloatBytes)
-        if (!IsFiniteBits(static_cast<std::uint32_t>(Get(payload, i, kFloatBytes))))
-            return Corrupt("WAL frame payload is not finite float32");
 
     return DecodedWalFrame{WalDecodeStatus::complete, static_cast<WalOperation>(Get(frame, 10, 2)),
                            Get(frame, 24, 8), Get(frame, 32, 8), expected_dimension, payload, size};

@@ -2,15 +2,44 @@
 
 #include "agent_io/storage.hpp"
 
+#include <vector>
 #include <windows.h>
 
 namespace agent_io::wal_detail {
 
-// File creation and ownership stay native; tests can drive short writes and flush failures.
+inline constexpr std::size_t kWalHeaderBytes = 64;
+
 struct NativeIo {
     decltype(&::WriteFile) write = ::WriteFile;
     decltype(&::FlushFileBuffers) flush = ::FlushFileBuffers;
+    decltype(&::SetFilePointerEx) seek = ::SetFilePointerEx;
+    decltype(&::SetEndOfFile) truncate = ::SetEndOfFile;
+    decltype(&::MoveFileExW) publish = ::MoveFileExW;
+    decltype(&::CreateFileW) open = ::CreateFileW;
 };
+
+// Thread-local so engine tests can inject faults through the normal entry points.
+NativeIo& CurrentNativeIo();
+
+struct WalFileSnapshot {
+    std::filesystem::path path;
+    FILE_ID_INFO identity{};
+    std::uint64_t scanned_bytes = 0;
+    std::array<std::byte, kWalHeaderBytes> encoded_header{};
+};
+
+struct ScannedWalFile {
+    WalFileSnapshot snapshot;
+    std::vector<std::byte> bytes;
+};
+
+Result<ScannedWalFile> ReadWalForRecovery(const std::filesystem::path& path);
+
+// A successful result holds a writer only when the latest log is empty after
+// tail repair. The writer takes ownership of the handle used for the flush.
+Result<std::unique_ptr<WalWriter>> FinishWalRecovery(
+    const WalFileSnapshot& snapshot, std::uint64_t valid_bytes,
+    const WalFileHeader& header, std::uint32_t dimension, const WalOptions& options);
 
 Result<std::unique_ptr<WalWriter>> CreateWriter(
     const std::filesystem::path& directory, const WalFileHeader& header,

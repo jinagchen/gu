@@ -318,6 +318,12 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
                            "Cannot create the WAL directory: " + impl->wal_directory.string());
     }
 
+    auto recovery = ScanWalDirectory(impl->wal_directory, impl->manifest.instance_id,
+                                     impl->manifest.dimension, impl->published_sequence,
+                                     options.wal);
+    if (const auto* error = std::get_if<Error>(&recovery)) return *error;
+    auto report = std::get<RecoveryReport>(std::move(recovery));
+
     // The delta is bounded twice: by the memory budget it has to live inside,
     // and by the retention limit the resource contract declares.
     const auto record_bytes = DeltaRecordBytes(impl->manifest.dimension);
@@ -326,6 +332,9 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
                           static_cast<std::uint64_t>(options.resources.max_retained_delta_vectors));
     capacity = (std::min)(capacity,
                           static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max() / 2));
+    if (report.records.size() > capacity)
+        return Failure(ErrorCode::resource_exhausted,
+                       "The WAL holds more records than the delta can retain");
     if (capacity > 0) {
         DeltaOptions delta_options;
         delta_options.dimension = impl->manifest.dimension;
@@ -336,23 +345,10 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
         impl->delta_resident_bytes = impl->delta->ResidentBytes();
     }
 
-    auto recovery = ScanWalDirectory(impl->wal_directory, impl->manifest.instance_id,
-                                     impl->manifest.dimension, impl->published_sequence,
-                                     options.wal);
-    if (const auto* error = std::get_if<Error>(&recovery)) return *error;
-    auto report = std::get<RecoveryReport>(std::move(recovery));
     impl->replayed_records = report.records.size();
     impl->discarded_tail_bytes = report.discarded_tail_bytes;
     impl->wal_files_scanned = report.files.size();
     if (!report.records.empty()) {
-        // A history that exists but cannot be held is worse than a refusal: the
-        // caller would see an index that silently lost acknowledged writes.
-        if (!impl->delta)
-            return Failure(ErrorCode::resource_exhausted,
-                           "The WAL holds records but no delta budget is configured");
-        if (report.records.size() > impl->delta->SlotCapacity())
-            return Failure(ErrorCode::resource_exhausted,
-                           "The WAL holds more records than the delta can retain");
         // The count is over IDs, not records: a second version and an overwrite
         // of a segmented vector are not new vectors. The write path applies the
         // same rule, so replay must not diverge from it just because the history
@@ -373,6 +369,15 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
     }
     if (report.highest_sequence > impl->published_sequence)
         impl->published_sequence = report.highest_sequence;
+
+    if (report.latest) {
+        const auto& latest = *report.latest;
+        auto finished = wal_detail::FinishWalRecovery(latest.file, latest.valid_bytes,
+            latest.header, impl->manifest.dimension, options.wal);
+        if (const auto* error = std::get_if<Error>(&finished)) return *error;
+        impl->wal = std::get<std::unique_ptr<WalWriter>>(std::move(finished));
+        if (impl->wal) impl->wal_file_bytes = latest.valid_bytes;
+    }
 
     impl->view.instance_id = impl->manifest.instance_id;
     impl->view.view_generation = 1;
@@ -429,6 +434,8 @@ Result<WriteReceipt> Engine::Impl::ApplyWrite(WalOperation operation, VectorId i
     if (operation == WalOperation::insert && existed)
         return Failure(ErrorCode::already_exists, "Logical ID already exists in the index");
 
+    if (published_sequence == (std::numeric_limits<Sequence>::max)())
+        return Failure(ErrorCode::resource_exhausted, "WAL sequence space is exhausted");
     const Sequence sequence = published_sequence + 1;
     const auto pin = delta->CapturePin();
     auto reserved = delta->ReserveSlot();
@@ -444,27 +451,36 @@ Result<WriteReceipt> Engine::Impl::ApplyWrite(WalOperation operation, VectorId i
 
     // Capacity is settled before the first byte: a group is never split because
     // it turned out not to fit.
+    const auto stop_after_wal_io = [this](const Error& error) {
+        // An empty log may already have been published before attachment failed.
+        if (error.code == ErrorCode::io_error) {
+            recovery_required = true;
+            recovery_message = error.message;
+        }
+    };
     if (!wal) {
         WalFileHeader header{};
         header.instance_id = manifest.instance_id;
         header.start_sequence = sequence;
         auto created = CreateWalWriter(wal_directory, header, manifest.dimension, options.wal);
         if (const auto* error = std::get_if<Error>(&created)) {
+            stop_after_wal_io(*error);
             release_slot();
             return *error;
         }
         wal = std::get<std::unique_ptr<WalWriter>>(std::move(created));
-        wal_file_bytes = 64;
+        wal_file_bytes = wal_detail::kWalHeaderBytes;
     } else if (wal_file_bytes + frame_bytes > options.wal.rotation_bytes) {
         WalFileHeader next{};
         next.instance_id = manifest.instance_id;
         next.start_sequence = sequence;
         auto rotated = wal->Rotate(next);
         if (const auto* error = std::get_if<Error>(&rotated)) {
+            stop_after_wal_io(*error);
             release_slot();
             return *error;
         }
-        wal_file_bytes = 64;
+        wal_file_bytes = wal_detail::kWalHeaderBytes;
     }
 
     std::vector<std::byte> frame(static_cast<std::size_t>(frame_bytes));

@@ -2,13 +2,16 @@
 
 #include <objbase.h>
 
+#include <algorithm>
+#include <cstring>
 #include <limits>
 #include <utility>
 
 namespace agent_io::wal_detail {
 namespace {
 
-constexpr std::size_t kHeaderBytes = 64;
+constexpr auto kHeaderBytes = kWalHeaderBytes;
+constexpr std::uint64_t kMaxWalFileBytes = std::uint64_t{1} << 32;
 
 struct Failure {
     ErrorCode code;
@@ -40,6 +43,69 @@ public:
 
     HANDLE handle = INVALID_HANDLE_VALUE;
 };
+
+Result<WalFileSnapshot> InspectFile(HANDLE handle, const std::filesystem::path& path) {
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &attributes, sizeof(attributes)))
+        return NativeFailure("Inspect WAL file attributes", GetLastError()).AsError();
+    if (attributes.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+        return NativeFailure("WAL path must name a regular file", ERROR_INVALID_DATA).AsError();
+
+    WalFileSnapshot snapshot;
+    snapshot.path = path;
+    if (!GetFileInformationByHandleEx(handle, FileIdInfo, &snapshot.identity, sizeof(snapshot.identity)))
+        return NativeFailure("Read WAL file identity", GetLastError()).AsError();
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(handle, &size))
+        return NativeFailure("Read WAL file size", GetLastError()).AsError();
+    snapshot.scanned_bytes = static_cast<std::uint64_t>(size.QuadPart);
+    return snapshot;
+}
+
+std::optional<Failure> ReadExact(HANDLE handle, std::span<std::byte> output) {
+    while (!output.empty()) {
+        const auto requested = static_cast<DWORD>((std::min)(output.size(), std::size_t{8} << 20));
+        DWORD read = 0;
+        if (!ReadFile(handle, output.data(), requested, &read, nullptr))
+            return NativeFailure("Read WAL file", GetLastError());
+        if (read == 0) return NativeFailure("Unexpected EOF reading WAL file", ERROR_HANDLE_EOF);
+        output = output.subspan(read);
+    }
+    return {};
+}
+
+Result<Success> OpenVerified(NativeFile& file, const WalFileSnapshot& snapshot,
+                             const NativeIo& io) {
+    file.handle = io.open(snapshot.path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file.handle == INVALID_HANDLE_VALUE)
+        return NativeFailure("Open existing WAL for writing", GetLastError()).AsError();
+    auto inspected = InspectFile(file.handle, snapshot.path);
+    if (const auto* error = std::get_if<Error>(&inspected)) return *error;
+    const auto& current = std::get<WalFileSnapshot>(inspected);
+    if (current.identity.VolumeSerialNumber != snapshot.identity.VolumeSerialNumber ||
+        std::memcmp(&current.identity.FileId, &snapshot.identity.FileId, sizeof(FILE_ID_128)) != 0 ||
+        current.scanned_bytes != snapshot.scanned_bytes)
+        return NativeFailure("WAL identity or size changed before opening for write",
+                             ERROR_INVALID_DATA).AsError();
+    std::array<std::byte, kHeaderBytes> encoded_header{};
+    if (auto failure = ReadExact(file.handle, encoded_header)) return failure->AsError();
+    if (encoded_header != snapshot.encoded_header)
+        return NativeFailure("WAL header changed before opening for write", ERROR_INVALID_DATA).AsError();
+    return Success{};
+}
+
+std::optional<Failure> ValidateWriter(const std::filesystem::path& directory,
+                                     std::uint32_t dimension, const WalOptions& options,
+                                     const NativeIo& io) {
+    const auto size = WalFrameBytes(dimension);
+    const auto* frame = std::get_if<std::uint64_t>(&size);
+    if (directory.empty() || !frame || *frame > options.max_frame_bytes ||
+        options.rotation_bytes < kHeaderBytes + static_cast<std::uint64_t>(options.max_frame_bytes) ||
+        !io.write || !io.flush || !io.seek || !io.truncate || !io.publish || !io.open)
+        return Failure{ErrorCode::invalid_argument, "Invalid WAL directory, dimension, or limits"};
+    return {};
+}
 
 std::string GuidText(const GUID& guid) {
     constexpr char kHex[] = "0123456789abcdef";
@@ -74,6 +140,11 @@ public:
         auto result = EncodeWalFileHeader(header, encoded);
         if (auto* error = std::get_if<Error>(&result)) return std::move(*error);
         return Open(encoded, header.start_sequence, false);
+    }
+
+    void AdoptEmpty(NativeFile& file) {
+        file_.handle = std::exchange(file.handle, INVALID_HANDLE_VALUE);
+        file_bytes_ = kHeaderBytes;
     }
 
     Result<Success> Append(std::span<const std::byte> encoded_frame) override {
@@ -131,10 +202,10 @@ public:
             closed_ = true;
             if (auto close_error = file_.Close(); close_error && !failure_) {
                 if (dirty_) close_error->effect = WriteEffect::may_have_applied;
-                failure_ = *close_error;
+                failure_ = close_error->AsError();
             }
         }
-        if (failure_) return failure_->AsError();
+        if (failure_) return *failure_;
         return Success{};
     }
 
@@ -146,9 +217,11 @@ private:
         return {};
     }
 
-    Error Stop(Failure failure) {
-        failure_ = failure;
-        return failure.AsError();
+    Error Stop(Failure failure) { return Stop(failure.AsError()); }
+
+    Error Stop(Error error) {
+        failure_ = error;
+        return error;
     }
 
     std::optional<Failure> WriteAll(std::span<const std::byte> input) {
@@ -179,16 +252,30 @@ private:
                            static_cast<int>(generated)}.AsError();
         // Build the path before releasing the old handle. Each file gets its own UUID.
         const auto path = directory_ / ("wal-" + std::to_string(first) + "-" + GuidText(id) + ".log");
+        auto pending = path;
+        pending.replace_extension(L".pending");
         if (rotating) {
             if (auto failure = Flush()) return Stop(*failure);
             if (auto failure = file_.Close()) return Stop(*failure);
         }
-        file_.handle = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                                     FILE_ATTRIBUTE_NORMAL, nullptr);
+        file_.handle = io_.open(pending.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file_.handle == INVALID_HANDLE_VALUE)
-            return Stop(NativeFailure("Create WAL file", GetLastError()));
+            return Stop(NativeFailure("Create pending WAL file", GetLastError()));
         if (auto failure = WriteAll(encoded)) return Stop(*failure);
         if (auto failure = Flush()) return Stop(*failure);
+        auto inspected = InspectFile(file_.handle, path);
+        if (auto* error = std::get_if<Error>(&inspected)) return Stop(std::move(*error));
+        auto snapshot = std::get<WalFileSnapshot>(std::move(inspected));
+        if (snapshot.scanned_bytes != encoded.size())
+            return Stop(NativeFailure("Unexpected pending WAL size", ERROR_INVALID_DATA));
+        std::copy(encoded.begin(), encoded.end(), snapshot.encoded_header.begin());
+        if (auto failure = file_.Close()) return Stop(*failure);
+        // No replace or copy flags: publication must be a same-volume rename.
+        if (!io_.publish(pending.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH))
+            return Stop(NativeFailure("Publish new WAL file header", GetLastError()));
+        auto attached = OpenVerified(file_, snapshot, io_);
+        if (auto* error = std::get_if<Error>(&attached)) return Stop(std::move(*error));
         file_bytes_ = encoded.size();
         return Success{};
     }
@@ -203,20 +290,79 @@ private:
     std::uint64_t file_bytes_ = 0;
     bool dirty_ = false;
     bool closed_ = false;
-    std::optional<Failure> failure_;
+    std::optional<Error> failure_;
 };
 
 }  // namespace
 
+NativeIo& CurrentNativeIo() {
+    static thread_local NativeIo io;
+    return io;
+}
+
+Result<ScannedWalFile> ReadWalForRecovery(const std::filesystem::path& path) {
+    NativeFile file;
+    file.handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file.handle == INVALID_HANDLE_VALUE)
+        return NativeFailure("Open WAL for read-only recovery scan", GetLastError()).AsError();
+    auto inspected = InspectFile(file.handle, path);
+    if (const auto* error = std::get_if<Error>(&inspected)) return *error;
+    auto snapshot = std::get<WalFileSnapshot>(std::move(inspected));
+    const auto size = snapshot.scanned_bytes;
+    if (size < kHeaderBytes || size > kMaxWalFileBytes)
+        return Failure{ErrorCode::corruption, "WAL file size is outside the supported range"}.AsError();
+    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+    if (auto failure = ReadExact(file.handle, bytes)) return failure->AsError();
+    std::copy_n(bytes.begin(), kHeaderBytes, snapshot.encoded_header.begin());
+    return ScannedWalFile{std::move(snapshot), std::move(bytes)};
+}
+
+Result<std::unique_ptr<WalWriter>> FinishWalRecovery(
+    const WalFileSnapshot& snapshot, std::uint64_t valid_bytes,
+    const WalFileHeader& header, std::uint32_t dimension, const WalOptions& options) {
+    const auto io = CurrentNativeIo();
+    if (valid_bytes < kHeaderBytes || valid_bytes > snapshot.scanned_bytes)
+        return Failure{ErrorCode::invalid_argument, "Invalid WAL recovery offset"}.AsError();
+    std::unique_ptr<Writer> writer;
+    if (valid_bytes == kHeaderBytes) {
+        std::error_code path_error;
+        const auto directory = std::filesystem::absolute(snapshot.path.parent_path(), path_error);
+        if (path_error)
+            return Failure{ErrorCode::io_error, "Resolve WAL directory", path_error.value()}.AsError();
+        if (auto failure = ValidateWriter(directory, dimension, options, io))
+            return failure->AsError();
+        writer = std::make_unique<Writer>(directory, header, dimension, options, io);
+    }
+
+    NativeFile file;
+    auto verified = OpenVerified(file, snapshot, io);
+    if (const auto* error = std::get_if<Error>(&verified)) return *error;
+
+    if (valid_bytes < snapshot.scanned_bytes) {
+        LARGE_INTEGER position{};
+        position.QuadPart = static_cast<LONGLONG>(valid_bytes);
+        if (!io.seek(file.handle, position, nullptr, FILE_BEGIN))
+            return NativeFailure("Position latest WAL for tail repair", GetLastError()).AsError();
+        if (!io.truncate(file.handle))
+            return NativeFailure("Truncate latest WAL tail", GetLastError()).AsError();
+    }
+    // A prior attempt may have changed the length without syncing it.
+    if (!io.flush(file.handle))
+        return NativeFailure("Flush latest WAL during recovery", GetLastError()).AsError();
+    if (writer) {
+        writer->AdoptEmpty(file);
+    } else if (auto failure = file.Close()) {
+        return failure->AsError();
+    }
+    return std::unique_ptr<WalWriter>{std::move(writer)};
+}
+
 Result<std::unique_ptr<WalWriter>> CreateWriter(
     const std::filesystem::path& directory, const WalFileHeader& header,
     std::uint32_t dimension, const WalOptions& options, NativeIo io) {
-    const auto size = WalFrameBytes(dimension);
-    const auto* frame = std::get_if<std::uint64_t>(&size);
-    if (directory.empty() || !frame || *frame > options.max_frame_bytes ||
-        options.rotation_bytes < kHeaderBytes + static_cast<std::uint64_t>(options.max_frame_bytes) ||
-        !io.write || !io.flush)
-        return Failure{ErrorCode::invalid_argument, "Invalid WAL directory, dimension, or limits"}.AsError();
+    if (auto failure = ValidateWriter(directory, dimension, options, io))
+        return failure->AsError();
     std::error_code path_error;
     const auto absolute_directory = std::filesystem::absolute(directory, path_error);
     if (path_error) return Failure{ErrorCode::io_error, "Resolve WAL directory", path_error.value()}.AsError();
@@ -233,7 +379,8 @@ namespace agent_io {
 Result<std::unique_ptr<WalWriter>> CreateWalWriter(
     const std::filesystem::path& directory, const WalFileHeader& header,
     std::uint32_t dimension, const WalOptions& options) {
-    return wal_detail::CreateWriter(directory, header, dimension, options, {});
+    return wal_detail::CreateWriter(directory, header, dimension, options,
+                                    wal_detail::CurrentNativeIo());
 }
 
 }  // namespace agent_io

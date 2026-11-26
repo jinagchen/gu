@@ -108,6 +108,8 @@ void CheckCodec() {
         auto bad = frame;
         bad[offset] ^= std::byte{1};
         Expect(DecodeWalFrame(bad, 2, 80), ErrorCode::corruption);
+        if (offset >= 72)
+            Expect(DecodeWalFrame(Bytes(bad).first(offset + 1), 2, 80), ErrorCode::corruption);
     }
     auto bad = frame;
     std::fill_n(bad.begin() + 24, 8, std::byte{});
@@ -146,14 +148,14 @@ struct Fixture {
 };
 
 std::vector<std::byte> ReadLog(const std::filesystem::path& directory, Sequence first,
-                               std::size_t expected_size) {
+                               std::size_t expected_size, std::wstring_view extension = L".log") {
     const auto prefix = L"wal-" + std::to_wstring(first) + L"-";
     std::filesystem::path path;
     for (const auto& item : std::filesystem::directory_iterator(directory)) {
         const auto name = item.path().filename().wstring();
-        if (!name.starts_with(prefix)) continue;
-        Require(path.empty() && name.size() == prefix.size() + 36 + 4 &&
-                item.path().extension() == L".log", "WAL filename");
+        if (!name.starts_with(prefix) || item.path().extension().native() != extension) continue;
+        Require(path.empty() && name.size() == prefix.size() + 36 + extension.size(),
+                "WAL filename");
         path = item.path();
     }
     Require(!path.empty() && std::filesystem::file_size(path) == expected_size, "WAL file size");
@@ -162,6 +164,13 @@ std::vector<std::byte> ReadLog(const std::filesystem::path& directory, Sequence 
     file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     Require(static_cast<bool>(file), "read WAL file");
     return bytes;
+}
+
+std::size_t CountLogs(const std::filesystem::path& directory) {
+    std::size_t count = 0;
+    for (const auto& item : std::filesystem::directory_iterator(directory))
+        if (item.path().extension() == L".log") ++count;
+    return count;
 }
 
 void CheckWriter() {
@@ -295,12 +304,48 @@ void CheckFaults() {
     Expect(writer->Append(Frame(51)), ErrorCode::recovery_required);
     Expect(writer->Close(), ErrorCode::io_error);
     ReadLog(fixture.path, 50, 144);
-    ReadLog(fixture.path, 51, 64);
+    ReadLog(fixture.path, 51, 64, L".pending");
 
     fail_flush_at = flushes + 1;
     Expect(wal_detail::CreateWriter(fixture.path, {kUuid, 60}, 2, {}, {TestWrite, TestFlush}),
            ErrorCode::io_error);
-    ReadLog(fixture.path, 60, 64);
+    ReadLog(fixture.path, 60, 64, L".pending");
+    Require(CountLogs(fixture.path) == 5, "header flush failures must not publish a log");
+
+    fault = Fault::partial_then_fail;
+    writes = 0;
+    Expect(wal_detail::CreateWriter(fixture.path, {kUuid, 70}, 2, {}, {TestWrite, TestFlush}),
+           ErrorCode::io_error);
+    ReadLog(fixture.path, 70, 32, L".pending");
+    Require(CountLogs(fixture.path) == 5, "a partial header stays unpublished");
+}
+
+BOOL WINAPI CollidingPublish(LPCWSTR pending, LPCWSTR target, DWORD flags) {
+    const HANDLE blocker = CreateFileW(target, GENERIC_WRITE, 0, nullptr, CREATE_NEW, 0, nullptr);
+    if (blocker == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD written = 0;
+    const BOOL ok = WriteFile(blocker, "collision", 9, &written, nullptr);
+    CloseHandle(blocker);
+    if (!ok || written != 9) {
+        SetLastError(ERROR_WRITE_FAULT);
+        return FALSE;
+    }
+    return MoveFileExW(pending, target, flags);
+}
+
+void CheckPublishDoesNotReplace() {
+    Fixture fixture;
+    wal_detail::NativeIo io;
+    io.publish = CollidingPublish;
+    const auto error = Expect(wal_detail::CreateWriter(fixture.path, {kUuid, 1}, 2, {}, io),
+                              ErrorCode::io_error);
+    Require(error.system_error == ERROR_ALREADY_EXISTS || error.system_error == ERROR_FILE_EXISTS,
+            "native no-replace error");
+    Require(ReadLog(fixture.path, 1, 9) == Hex("636f6c6c6973696f6e"),
+            "publication cannot overwrite the destination");
+    const auto header = ReadLog(fixture.path, 1, 64, L".pending");
+    Require(Take(DecodeWalFileHeader(header)).start_sequence == 1,
+            "failed publication leaves the valid header pending");
 }
 
 void CrashChild(const std::filesystem::path& directory) {
@@ -313,12 +358,26 @@ void CrashChild(const std::filesystem::path& directory) {
     throw std::runtime_error("test child did not terminate during the partial append");
 }
 
-void CheckProcessExit() {
+BOOL WINAPI KillBeforePublish(LPCWSTR, LPCWSTR, DWORD) {
+    TerminateProcess(GetCurrentProcess(), kChildExit);
+    SetLastError(ERROR_OPERATION_ABORTED);
+    return FALSE;
+}
+
+void HeaderCrashChild(const std::filesystem::path& directory) {
+    wal_detail::NativeIo io;
+    io.publish = KillBeforePublish;
+    Take(wal_detail::CreateWriter(directory, {kUuid, 1}, 2, {}, io));
+    throw std::runtime_error("test child did not terminate before publishing the header");
+}
+
+void CheckProcessExit(bool header_only = false) {
     Fixture fixture;
     wchar_t path[MAX_PATH]{};
     const DWORD size = GetModuleFileNameW(nullptr, path, MAX_PATH);
     Require(size != 0 && size < MAX_PATH, "test executable path");
-    auto command = L"\"" + std::wstring(path) + L"\" --crash \"" + fixture.path.native() + L"\"";
+    auto command = L"\"" + std::wstring(path) +
+        (header_only ? L"\" --header-crash \"" : L"\" --crash \"") + fixture.path.native() + L"\"";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION child{};
@@ -334,6 +393,12 @@ void CheckProcessExit() {
     }
     CloseHandle(child.hProcess);
     Require(got_exit && code == kChildExit, "child must exit by forced termination");
+    if (header_only) {
+        Require(CountLogs(fixture.path) == 0, "an exit before publication leaves no log");
+        const auto header = ReadLog(fixture.path, 1, 64, L".pending");
+        Require(Take(DecodeWalFileHeader(header)).start_sequence == 1, "pending header is complete");
+        return;
+    }
     const auto log = ReadLog(fixture.path, 1, 184);
     Require(Take(DecodeWalFileHeader(Bytes(log).first(64))).start_sequence == 1, "crash header");
     const auto durable = Take(DecodeWalFrame(Bytes(log).subspan(64), 2, 80));
@@ -348,10 +413,13 @@ void CheckProcessExit() {
 int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 3 && std::wstring_view(argv[1]) == L"--crash") CrashChild(argv[2]);
+        if (argc == 3 && std::wstring_view(argv[1]) == L"--header-crash") HeaderCrashChild(argv[2]);
         CheckCodec();
         CheckWriter();
         CheckFaults();
+        CheckPublishDoesNotReplace();
         CheckProcessExit();
+        CheckProcessExit(true);
         std::puts("WAL codec, writer, native fault injection, and process-exit checks passed");
         return 0;
     } catch (const std::exception& error) {
