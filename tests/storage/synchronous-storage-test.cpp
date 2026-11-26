@@ -432,22 +432,34 @@ class ParkedBackend final : public MeteredReadBackend {
     std::condition_variable queued_;
     std::list<Request> requests_;
     ReadBackendStats stats_;
+    bool pause_first_background_ = false;
 public:
+    explicit ParkedBackend(bool pause_first_background = false)
+        : pause_first_background_(pause_first_background) {}
+
     Result<Success> Submit(ReadRequest request, ReadCallback callback) override {
-        std::lock_guard lock(mutex_);
+        std::unique_lock lock(mutex_);
+        const bool pause = pause_first_background_ && request.priority == ReadPriority::background;
         requests_.push_back(Request{std::move(request), std::move(callback)});
         ++stats_.io_reads_submitted;
         queued_.notify_all();
+        if (pause) queued_.wait_for(lock, 2s, [&] { return !pause_first_background_; });
         return Success{};
     }
-    bool WaitForDemand(std::size_t count) {
+    void ResumeBackground() {
+        std::lock_guard lock(mutex_);
+        pause_first_background_ = false;
+        queued_.notify_all();
+    }
+    bool WaitFor(ReadPriority priority, std::size_t count) {
         std::unique_lock lock(mutex_);
         return queued_.wait_for(lock, 1s, [&] {
-            return static_cast<std::size_t>(std::ranges::count_if(requests_, [](const auto& request) {
-                return request.request.priority == ReadPriority::demand;
+            return static_cast<std::size_t>(std::ranges::count_if(requests_, [&](const auto& request) {
+                return request.request.priority == priority;
             })) >= count;
         });
     }
+    bool WaitForDemand(std::size_t count) { return WaitFor(ReadPriority::demand, count); }
     void Finish(bool short_read, std::optional<ReadPriority> priority = std::nullopt) {
         std::optional<Request> request;
         {
@@ -597,6 +609,133 @@ void CheckBatchDispatch(Fixture& fixture) {
     std::puts("PASS: deadline stops new reads, queued sharing and demand use of free slots");
 }
 
+void CheckBackgroundScheduling(Fixture& fixture) {
+    using Clock = std::chrono::steady_clock;
+    constexpr auto demand = ReadPriority::demand;
+    constexpr auto background = ReadPriority::background;
+    constexpr auto prefetch = ReadPriority::prefetch;
+    auto governor = Take(CreateResourceGovernor(Budget()));
+    auto registry = Take(CreateSynchronousFileRegistry(governor, {false, 4, 4}));
+    auto file = Take(registry->Open(fixture.path));
+    const auto at = [&](std::uint64_t block) {
+        return BlockLocation{{file->Id(), block * 4096, 4096}, file};
+    };
+    const auto options = [](ReadPriority priority) {
+        return BlockReadOptions{priority, Clock::now() + 4s};
+    };
+    auto parked = std::make_shared<ParkedBackend>();
+    auto reader = Take(CreateOptimizedBlockReader(governor, parked, {4, 0, false}));
+    const auto probe = at(0);
+    Expect(reader->ReadBatch(std::span(&probe, 1), options(background)), ErrorCode::unsupported);
+    Take(reader->Drain());
+    parked = std::make_shared<ParkedBackend>();
+    for (auto invalid : {ReadScheduling{0, 1, 2, 1}, ReadScheduling{2, 0, 2, 1},
+                         ReadScheduling{2, 1, 0, 1}, ReadScheduling{2, 1, 3, 1},
+                         ReadScheduling{2, 1, 2, 0}}) {
+        Expect(CreateOptimizedBlockReader(governor, parked, {4, 1, true, invalid}),
+            ErrorCode::invalid_argument);
+    }
+    Expect(CreateOptimizedBlockReader(governor, parked, {4, 2, true, ReadScheduling{2, 1, 2, 1}}),
+        ErrorCode::invalid_argument);
+    reader = Take(CreateOptimizedBlockReader(governor, parked, {4, 1, true, ReadScheduling{2, 1, 2, 1}}));
+    const auto wait_backlog = [&](std::size_t count) {
+        const auto end = Clock::now() + 1s;
+        while (reader->Stats().queued_background_reads != count && Clock::now() < end)
+            std::this_thread::sleep_for(1ms);
+        Require(reader->Stats().queued_background_reads == count, "Background backlog differs");
+    };
+    Require(Take(reader->TryPrefetch(probe, options(prefetch).deadline)) ==
+        PrefetchDisposition::admitted, "Could not occupy a speculative slot");
+    const std::array maintenance{at(1), at(2), at(3)};
+    auto bg = std::async(std::launch::async, [&] { return reader->ReadBatch(maintenance, options(background)); });
+    Require(parked->WaitFor(background, 1), "Background did not use its reserved slot");
+    wait_backlog(2);
+
+    const std::array foreground{at(4), at(5)};
+    auto fg = std::async(std::launch::async, [&] { return reader->ReadBatch(foreground, options(demand)); });
+    Require(parked->WaitForDemand(2), "Background and prefetch consumed demand reserve");
+    Require(parked->Stats().io_reads_submitted == 4 && reader->Stats().peak_inflight_reads == 4,
+        "Concurrent reads exceeded the global cap");
+    parked->Finish(false, prefetch);
+    Require(parked->WaitFor(background, 2), "Returning a speculative slot did not advance background");
+    wait_backlog(1);
+    parked->Finish(false, background);
+    Require(parked->WaitFor(background, 2), "Background didn't refill its own freed slot");
+    parked->Finish(false, background);
+    parked->Finish(false, background);
+    const auto background_blocks = Take(bg.get());
+    for (std::size_t i = 0; i < maintenance.size(); ++i)
+        Require(background_blocks[i]->Key() == maintenance[i].key, "Maintenance batch order differs");
+    parked->Finish(false, demand);
+    parked->Finish(false, demand);
+    Take(fg.get());
+    Take(reader->Quiesce(Clock::now() + 1s));
+    const auto stats = reader->Stats();
+    Require(stats.background_submitted == 3 && stats.peak_background_reads == 2 &&
+        stats.queued_background_reads == 0 && stats.cache_misses == 2 &&
+        stats.cache_resident_bytes == 3 * 4096, "Maintenance polluted cache or demand counters");
+    Take(reader->Drain());
+
+    // Pause the background dispatcher inside its first Submit; it still has
+    // an eligible queued block. One demand may pass, but the next must wait.
+    parked = std::make_shared<ParkedBackend>(true);
+    reader = Take(CreateOptimizedBlockReader(governor, parked, {4, 0, false, ReadScheduling{1, 1, 3, 1}}));
+    bg = std::async(std::launch::async, [&] { return reader->ReadBatch(maintenance, options(background)); });
+    Require(parked->WaitFor(background, 1), "Background didn't start the burst fixture");
+    wait_backlog(2);
+    Expect(reader->ReadBatch(foreground, {demand, Clock::now() + 60ms}), ErrorCode::deadline_exceeded);
+    Require(parked->Stats().io_reads_submitted == 2, "Demand exceeded the burst with eligible background work");
+    parked->ResumeBackground();
+    Require(parked->WaitFor(background, 3), "Background did not advance after a bounded demand burst");
+    parked->Finish(false, demand);
+    parked->Finish(false, background);
+    parked->Finish(false, background);
+    parked->Finish(false, background);
+    Take(bg.get());
+    Take(reader->Drain());
+
+    // Idle background capacity can be borrowed. After it queues, the next
+    // freed slot goes to maintenance before more demand can borrow it.
+    parked = std::make_shared<ParkedBackend>();
+    reader = Take(CreateOptimizedBlockReader(governor, parked, {2, 0, false, ReadScheduling{1, 1, 1, 2}}));
+    fg = std::async(std::launch::async, [&] { return reader->ReadBatch(foreground, options(demand)); });
+    Require(parked->WaitForDemand(2), "Demand could not borrow idle maintenance capacity");
+    auto timed = std::async(std::launch::async, [&] {
+        return reader->ReadBatch(std::span(maintenance).first(2), {background, Clock::now() + 500ms});
+    });
+    wait_backlog(2);
+    parked->Finish(false, demand);
+    Require(parked->WaitFor(background, 1), "Maintenance did not reclaim the returned slot");
+    wait_backlog(1);
+    Expect(reader->ReadBatch(std::span(maintenance).last(1), options(background)),
+        ErrorCode::resource_exhausted);
+    Expect(timed.get(), ErrorCode::deadline_exceeded);
+    wait_backlog(0);
+    Expect(reader->Quiesce(Clock::now()), ErrorCode::deadline_exceeded);
+    parked->Finish(false, demand);
+    Take(fg.get());
+    // Keep the first background request pending until the demand caller is
+    // waiting on it: its own timeout alone must not cause a duplicate read.
+    Expect(reader->ReadBatch(std::span(maintenance).first(1), {demand, Clock::now() + 30ms}),
+        ErrorCode::deadline_exceeded);
+    Require(parked->Stats().io_reads_submitted == 3, "Same-key demand resubmitted an in-flight background read");
+    parked->Finish(false, background);
+    Take(reader->Quiesce(Clock::now() + 1s));
+
+    const auto read_one_background = [&] {
+        return reader->ReadBatch(std::span(maintenance).first(1), options(background));
+    };
+    auto retry = std::async(std::launch::async, read_one_background);
+    parked->Finish(true, background);
+    Expect(retry.get(), ErrorCode::io_error);
+    retry = std::async(std::launch::async, read_one_background);
+    parked->Finish(false, background);
+    Require(Take(retry.get()).front()->Bytes()[0] == std::byte{0x66},
+        "Background failure did not release the slot for retry");
+    Take(reader->Drain());
+    std::puts("PASS: fixed read reservations, demand burst, maintenance timeout and shared blocks");
+}
+
 void CheckIocp(Fixture& fixture) {
     auto governor = Take(CreateResourceGovernor(Budget()));
     auto registry = Take(CreateSynchronousFileRegistry(governor, {true, 4, 2, true}));
@@ -645,6 +784,19 @@ void CheckIocp(Fixture& fixture) {
         Expect(invalid, ErrorCode::io_error);
     Take(backend->Drain());
     Require(backend->Stats().io_read_errors == 1, "IOCP failed read was not counted once");
+
+    registry = Take(CreateSynchronousFileRegistry(governor, {true, 4, 2, true}));
+    file = Take(registry->Open(fixture.path));
+    std::shared_ptr<MeteredReadBackend> port = Take(CreateIocpReadBackend(governor, 2));
+    auto reader = Take(CreateOptimizedBlockReader(governor, port,
+        {2, 0, false, ReadScheduling{1, 1, 1, 1}}));
+    const BlockLocation at{{file->Id(), 8192, 4096}, file};
+    const auto blocks = Take(reader->ReadBatch(std::span(&at, 1),
+        {ReadPriority::background, std::chrono::steady_clock::now() + 2s}));
+    Require(std::equal(blocks.front()->Bytes().begin(), blocks.front()->Bytes().end(),
+        fixture.expected.begin() + 8192) && reader->Stats().background_submitted == 1,
+        "Scheduled native background read did not return correct bytes");
+    Take(reader->Drain());
     std::puts("PASS: native IOCP offsets, buffer exclusion, drain and read error");
 }
 }  // namespace
@@ -660,6 +812,7 @@ int main() {
         CheckClock(fixture);
         CheckPrefetch(fixture);
         CheckBatchDispatch(fixture);
+        CheckBackgroundScheduling(fixture);
         CheckIocp(fixture);
         std::puts("PASS: synchronous storage baseline");
         return 0;
