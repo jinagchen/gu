@@ -13,6 +13,8 @@ struct OptimizedReaderOptions {
     std::uint32_t max_inflight_reads;
     std::uint32_t max_prefetch_reads;
     bool cache_enabled;
+    // Opt-in until the Engine has a maintenance caller.
+    std::optional<ReadScheduling> scheduling = std::nullopt;
 };
 
 struct BlockReaderStats {
@@ -24,6 +26,9 @@ struct BlockReaderStats {
     std::uint64_t prefetch_ready_at_demand = 0;
     std::uint32_t peak_inflight_reads = 0;
     std::uint32_t peak_prefetch_reads = 0;
+    std::uint64_t background_submitted = 0;
+    std::size_t queued_background_reads = 0;
+    std::uint32_t peak_background_reads = 0;
 };
 
 // The caller and admitted I/O share this state, including query slot ownership.
