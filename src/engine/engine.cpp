@@ -1,16 +1,23 @@
 #include "agent_io/engine.hpp"
 #include "agent_io/optimized_storage.hpp"
+#include "agent_io/storage.hpp"
 
+#include "../index/delta.hpp"
 #include "../index/reader.hpp"
+#include "../index/recovery.hpp"
 
 #include <windows.h>
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace agent_io {
 namespace {
@@ -29,6 +36,23 @@ struct QuerySlot {
 std::uint32_t BlocksPerRow(const NodeRecordLayout& layout, std::uint32_t block_bytes) {
     if (block_bytes == 0) return 1;
     return (std::max)(1u, layout.row_bytes / block_bytes);
+}
+
+double SquaredL2(const float* left, const float* right, std::uint32_t dimension) {
+    double total = 0.0;
+    for (std::uint32_t index = 0; index < dimension; ++index) {
+        const double delta = static_cast<double>(left[index]) - static_cast<double>(right[index]);
+        total += delta * delta;
+    }
+    return total;
+}
+
+bool AllFinite(std::span<const float> values) {
+    for (const auto value : values) {
+        const auto bits = std::bit_cast<std::uint32_t>(value);
+        if ((bits & 0x7f800000u) == 0x7f800000u) return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -53,11 +77,39 @@ struct Engine::Impl {
     mutable std::shared_mutex mutex;
     bool closed = false;
 
+    // --- stage 6: durable writes ---------------------------------------
+    std::filesystem::path wal_directory;
+    std::unique_ptr<DeltaLayer> delta;
+    std::unique_ptr<WalWriter> wal;
+    // Serialises publication: a write reserves a slot, appends, syncs, and only
+    // then moves the prefix. One coordinator keeps the prefix and the WAL in
+    // the same order without a second protocol.
+    std::mutex publication_mutex;
+    Sequence published_sequence = 0;
+    std::atomic<std::uint32_t> pending_writes{0};
+    std::uint64_t wal_file_bytes = 0;
+    std::uint64_t wal_bytes_written = 0;
+    std::uint64_t logical_update_bytes = 0;
+    std::uint64_t delta_resident_bytes = 0;
+    std::uint64_t frame_bytes = 0;
+    // Set when a sync failed after bytes may have reached the file. The engine
+    // then refuses further writes rather than guess what the file contains.
+    bool recovery_required = false;
+    std::string recovery_message;
+
+    // Recovery facts, kept for Stats and for the run artifacts.
+    std::uint64_t replayed_records = 0;
+    std::uint64_t discarded_tail_bytes = 0;
+    std::uint64_t wal_files_scanned = 0;
+
     ~Impl() {
         if (!closed) Release();
     }
 
     void Release() {
+        if (wal) static_cast<void>(wal->Close());
+        wal.reset();
+        delta.reset();
         if (reader) static_cast<void>(reader->Drain());
         adapter.reset();
         reader.reset();
@@ -70,7 +122,62 @@ struct Engine::Impl {
         }
         closed = true;
     }
+
+    // Rebuilds the snapshot the readers see. Called under the publication lock
+    // so a captured view never mixes a new prefix with an old delta pin.
+    void PublishView() {
+        view.snapshot_sequence = published_sequence;
+        view.live_count = live_count;
+        view.delta_count = 0;
+        if (delta && delta->CommittedCount() > 0 && view.delta_count < kMaxDeltaPins) {
+            view.deltas[view.delta_count] = delta->CapturePin();
+            ++view.delta_count;
+        }
+    }
+
+    // True when the ID already has a row in a published segment, i.e. the
+    // manifest's live count already includes it. Recovery needs this to tell a
+    // genuinely new ID from an overwrite of a vector that was there all along.
+    Result<bool> ExistsInBase(VectorId id) {
+        for (std::uint32_t index = 0; index < view.segment_count; ++index) {
+            const auto found = access->FindId(view.segments[index].id, id);
+            if (const auto* error = std::get_if<Error>(&found)) return *error;
+            if (std::get<std::optional<VersionDirectoryEntry>>(found).has_value()) return true;
+        }
+        return false;
+    }
+
+    // Highest version of `id` visible at `snapshot`, across the delta and every
+    // segment. Existence questions must consult both, otherwise a fresh insert
+    // would look absent to a duplicate check while a reader already sees it.
+    Result<std::optional<Sequence>> VisibleVersion(VectorId id, Sequence snapshot) {
+        std::optional<Sequence> best;
+        if (delta) {
+            const auto committed = delta->CommittedCount();
+            for (std::uint32_t index = 0; index < committed; ++index) {
+                if (delta->IdAt(index) != id) continue;
+                const auto version = delta->VersionAt(index);
+                if (version > snapshot) continue;
+                if (!best.has_value() || *best < version) best = version;
+            }
+        }
+        for (std::uint32_t index = 0; index < view.segment_count; ++index) {
+            const auto found = access->FindId(view.segments[index].id, id);
+            if (const auto* error = std::get_if<Error>(&found)) return *error;
+            const auto& entry = std::get<std::optional<VersionDirectoryEntry>>(found);
+            if (!entry.has_value() || entry->version > snapshot) continue;
+            if (!best.has_value() || *best < entry->version) best = entry->version;
+        }
+        return best;
+    }
+
+    // The single write path. Insert and Upsert differ only in whether an
+    // existing ID is a conflict, so the durability protocol lives here once.
+    Result<WriteReceipt> ApplyWrite(WalOperation operation, VectorId id,
+                                    std::span<const float> values,
+                                    const WriteOptions& write_options);
 };
+
 
 Engine::Engine(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
@@ -192,7 +299,220 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
     }
     impl->view.segment_count = impl->manifest.segment_count;
     impl->view.delta_count = 0;
+
+    // --- stage 6: open the write path and replay what the WAL still owes ----
+    impl->published_sequence = impl->manifest.checkpoint_sequence;
+    const auto frame_bytes = WalFrameBytes(impl->manifest.dimension);
+    if (const auto* error = std::get_if<Error>(&frame_bytes)) return *error;
+    impl->frame_bytes = std::get<std::uint64_t>(frame_bytes);
+    if (impl->frame_bytes > options.wal.max_frame_bytes)
+        return Failure(ErrorCode::invalid_argument,
+                       "The configured WAL frame limit is smaller than one record");
+
+    impl->wal_directory = directory / "wal";
+    {
+        std::error_code wal_error;
+        std::filesystem::create_directories(impl->wal_directory, wal_error);
+        if (wal_error)
+            return Failure(ErrorCode::io_error,
+                           "Cannot create the WAL directory: " + impl->wal_directory.string());
+    }
+
+    // The delta is bounded twice: by the memory budget it has to live inside,
+    // and by the retention limit the resource contract declares.
+    const auto record_bytes = DeltaRecordBytes(impl->manifest.dimension);
+    std::uint64_t capacity = options.memory.delta_bytes / record_bytes;
+    capacity = (std::min)(capacity,
+                          static_cast<std::uint64_t>(options.resources.max_retained_delta_vectors));
+    capacity = (std::min)(capacity,
+                          static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max() / 2));
+    if (capacity > 0) {
+        DeltaOptions delta_options;
+        delta_options.dimension = impl->manifest.dimension;
+        delta_options.slot_capacity = static_cast<std::uint32_t>(capacity);
+        auto layer = DeltaLayer::Create(delta_options, impl->governor);
+        if (const auto* error = std::get_if<Error>(&layer)) return *error;
+        impl->delta = std::get<std::unique_ptr<DeltaLayer>>(std::move(layer));
+        impl->delta_resident_bytes = impl->delta->ResidentBytes();
+    }
+
+    auto recovery = ScanWalDirectory(impl->wal_directory, impl->manifest.instance_id,
+                                     impl->manifest.dimension, impl->published_sequence,
+                                     options.wal);
+    if (const auto* error = std::get_if<Error>(&recovery)) return *error;
+    auto report = std::get<RecoveryReport>(std::move(recovery));
+    impl->replayed_records = report.records.size();
+    impl->discarded_tail_bytes = report.discarded_tail_bytes;
+    impl->wal_files_scanned = report.files.size();
+    if (!report.records.empty()) {
+        // A history that exists but cannot be held is worse than a refusal: the
+        // caller would see an index that silently lost acknowledged writes.
+        if (!impl->delta)
+            return Failure(ErrorCode::resource_exhausted,
+                           "The WAL holds records but no delta budget is configured");
+        if (report.records.size() > impl->delta->SlotCapacity())
+            return Failure(ErrorCode::resource_exhausted,
+                           "The WAL holds more records than the delta can retain");
+        // The count is over IDs, not records: a second version and an overwrite
+        // of a segmented vector are not new vectors. The write path applies the
+        // same rule, so replay must not diverge from it just because the history
+        // happens to hold several rows for one ID.
+        std::unordered_set<VectorId> counted;
+        std::uint64_t new_ids = 0;
+        for (const auto& record : report.records) {
+            const auto restored = impl->delta->RestoreRecord(record.id, record.sequence,
+                                                             record.values);
+            if (const auto* error = std::get_if<Error>(&restored)) return *error;
+            impl->logical_update_bytes += record.values.size() * sizeof(float);
+            if (!counted.insert(record.id).second) continue;
+            auto in_base = impl->ExistsInBase(record.id);
+            if (const auto* error = std::get_if<Error>(&in_base)) return *error;
+            if (!std::get<bool>(in_base)) ++new_ids;
+        }
+        impl->live_count = impl->manifest.live_count + new_ids;
+    }
+    if (report.highest_sequence > impl->published_sequence)
+        impl->published_sequence = report.highest_sequence;
+
+    impl->view.instance_id = impl->manifest.instance_id;
+    impl->view.view_generation = 1;
+    impl->view.manifest_generation = impl->manifest.generation;
+    impl->PublishView();
     return std::unique_ptr<Engine>(new Engine(std::move(impl)));
+}
+
+Result<WriteReceipt> Engine::Impl::ApplyWrite(WalOperation operation, VectorId id,
+                                              std::span<const float> values,
+                                              const WriteOptions& write_options) {
+    if (id == 0) return Failure(ErrorCode::invalid_argument, "Logical ID must be non-zero");
+    if (values.size() != manifest.dimension)
+        return Failure(ErrorCode::invalid_argument, "Write vector dimension mismatch");
+    if (!AllFinite(values))
+        return Failure(ErrorCode::invalid_argument,
+                       "Write vector must contain finite float32 values");
+    if (write_options.admission_timeout.count() <= 0)
+        return Failure(ErrorCode::invalid_argument, "Write admission timeout must be positive");
+    if (options.max_pending_writes == 0)
+        return Failure(ErrorCode::invalid_argument, "max_pending_writes must be positive");
+
+    // Admission happens before the publication lock: the counter bounds how
+    // many writers can queue, so a stalled disk cannot build an unbounded
+    // backlog of threads holding reserved slots.
+    const auto deadline = std::chrono::steady_clock::now() + write_options.admission_timeout;
+    while (true) {
+        auto current = pending_writes.load();
+        if (current < options.max_pending_writes) {
+            if (pending_writes.compare_exchange_weak(current, current + 1)) break;
+            continue;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+            return Failure(ErrorCode::resource_exhausted, "Write admission capacity exhausted");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    struct PendingGuard {
+        std::atomic<std::uint32_t>* counter;
+        ~PendingGuard() { counter->fetch_sub(1); }
+    } pending_guard{&pending_writes};
+
+    std::unique_lock<std::shared_mutex> guard(mutex);
+    if (closed) return Failure(ErrorCode::closed, "Engine is closed");
+    if (recovery_required) return Error{ErrorCode::recovery_required, recovery_message};
+    if (!delta)
+        return Failure(ErrorCode::resource_exhausted,
+                       "No delta budget is configured; writes are disabled");
+
+    std::lock_guard<std::mutex> publication(publication_mutex);
+
+    const auto existing = VisibleVersion(id, published_sequence);
+    if (const auto* error = std::get_if<Error>(&existing)) return *error;
+    const bool existed = std::get<std::optional<Sequence>>(existing).has_value();
+    if (operation == WalOperation::insert && existed)
+        return Failure(ErrorCode::already_exists, "Logical ID already exists in the index");
+
+    const Sequence sequence = published_sequence + 1;
+    const auto pin = delta->CapturePin();
+    auto reserved = delta->ReserveSlot();
+    if (const auto* error = std::get_if<Error>(&reserved)) return *error;
+    const SlotId slot = std::get<SlotId>(reserved);
+    auto release_slot = [this, slot]() { static_cast<void>(delta->CancelLastSlot(slot)); };
+
+    const auto stored = delta->WriteSlot(slot, id, sequence, values);
+    if (const auto* error = std::get_if<Error>(&stored)) {
+        release_slot();
+        return *error;
+    }
+
+    // Capacity is settled before the first byte: a group is never split because
+    // it turned out not to fit.
+    if (!wal) {
+        WalFileHeader header{};
+        header.instance_id = manifest.instance_id;
+        header.start_sequence = sequence;
+        auto created = CreateWalWriter(wal_directory, header, manifest.dimension, options.wal);
+        if (const auto* error = std::get_if<Error>(&created)) {
+            release_slot();
+            return *error;
+        }
+        wal = std::get<std::unique_ptr<WalWriter>>(std::move(created));
+        wal_file_bytes = 64;
+    } else if (wal_file_bytes + frame_bytes > options.wal.rotation_bytes) {
+        WalFileHeader next{};
+        next.instance_id = manifest.instance_id;
+        next.start_sequence = sequence;
+        auto rotated = wal->Rotate(next);
+        if (const auto* error = std::get_if<Error>(&rotated)) {
+            release_slot();
+            return *error;
+        }
+        wal_file_bytes = 64;
+    }
+
+    std::vector<std::byte> frame(static_cast<std::size_t>(frame_bytes));
+    const WalRecord record{operation, sequence, id, values};
+    auto encoded = EncodeWalFrame(record, frame);
+    if (const auto* error = std::get_if<Error>(&encoded)) {
+        release_slot();
+        return *error;
+    }
+
+    auto appended = wal->Append(frame);
+    if (auto* error = std::get_if<Error>(&appended)) {
+        // The writer promised not to write again after a failed append. The slot
+        // is unpublished, so taking it back keeps this process consistent with
+        // the torn tail a restart would discard.
+        error->attempted_sequence = sequence;
+        recovery_required = true;
+        recovery_message = error->message;
+        release_slot();
+        return *error;
+    }
+
+    auto synced = wal->Sync();
+    if (auto* error = std::get_if<Error>(&synced)) {
+        // Sync failed: the record may already be on disk. The slot stays
+        // reserved but unpublished: invisible here, possibly visible after a
+        // restart. That is exactly may_have_applied.
+        recovery_required = true;
+        recovery_message = error->message;
+        error->write_effect = WriteEffect::may_have_applied;
+        error->attempted_sequence = sequence;
+        return *error;
+    }
+
+    wal_file_bytes += frame_bytes;
+    wal_bytes_written += frame_bytes;
+    logical_update_bytes += static_cast<std::uint64_t>(values.size()) * sizeof(float);
+
+    const auto moved = delta->PublishPrefix(pin.committed_prefix + 1);
+    if (const auto* error = std::get_if<Error>(&moved)) {
+        recovery_required = true;
+        recovery_message = error->message;
+        return *error;
+    }
+    published_sequence = sequence;
+    if (!existed) ++live_count;
+    PublishView();
+    return WriteReceipt{id, sequence};
 }
 
 Result<SearchResult> Engine::Search(std::span<const float> query,
@@ -286,19 +606,59 @@ Result<SearchResult> Engine::Search(std::span<const float> query,
     auto refined = impl.adapter->Refine(refine_request);
     if (const auto* error = std::get_if<Error>(&refined)) return *error;
     const auto& candidates = std::get<std::vector<Candidate>>(refined);
-    result.neighbors.reserve((std::min)(static_cast<std::size_t>(options.k), candidates.size()));
+
+    // The graph cannot contain an ID written after the last checkpoint, so the
+    // delta is re-ranked on its own and the two sets are merged by version.
+    // A newer delta record replaces the graph's older one; the graph's copy is
+    // never allowed to win on distance alone.
+    std::unordered_map<VectorId, std::pair<Sequence, double>> ranked;
+    const auto consider = [&ranked](VectorId candidate_id, Sequence version, double distance) {
+        const auto existing = ranked.find(candidate_id);
+        if (existing == ranked.end() || existing->second.first < version)
+            ranked[candidate_id] = {version, distance};
+    };
     for (const auto& candidate : candidates) {
-        if (result.neighbors.size() >= options.k) break;
-        Neighbor neighbour;
-        neighbour.id = candidate.id;
-        neighbour.version = candidate.version;
-        neighbour.squared_distance = candidate.exact_distance.value_or(0.0);
-        result.neighbors.push_back(neighbour);
+        if (!candidate.exact_distance.has_value()) continue;
+        consider(candidate.id, candidate.version, *candidate.exact_distance);
     }
+    std::uint64_t delta_scanned = 0;
+    if (impl.delta) {
+        for (std::uint32_t delta_index = 0; delta_index < lease.view.delta_count; ++delta_index) {
+            const auto& pin = lease.view.deltas[delta_index];
+            // A pin from before a checkpoint names a retired segment; its
+            // records are in a segment file by now, not in this layer.
+            if (pin.segment != impl.delta->CurrentSegmentId()) continue;
+            for (std::uint32_t index = 0; index < pin.committed_prefix; ++index) {
+                const auto version = impl.delta->VersionAt(index);
+                if (version > lease.view.snapshot_sequence) continue;
+                ++delta_scanned;
+                const auto values = impl.delta->ValuesAt(index);
+                consider(impl.delta->IdAt(index), version,
+                         SquaredL2(query.data(), values.data(), impl.manifest.dimension));
+            }
+        }
+    }
+
+    std::vector<Neighbor> ordered;
+    ordered.reserve(ranked.size());
+    for (const auto& item : ranked) {
+        Neighbor neighbour;
+        neighbour.id = item.first;
+        neighbour.version = item.second.first;
+        neighbour.squared_distance = item.second.second;
+        ordered.push_back(neighbour);
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const Neighbor& left, const Neighbor& right) {
+        if (left.squared_distance != right.squared_distance)
+            return left.squared_distance < right.squared_distance;
+        return left.id < right.id;
+    });
+    if (ordered.size() > options.k) ordered.resize(options.k);
+    result.neighbors = std::move(ordered);
     result.metrics.cache_hits = query_reads->cache_hits;
     result.metrics.cache_misses = query_reads->cache_misses;
     result.metrics.logical_block_demands = result.metrics.cache_hits + result.metrics.cache_misses;
-    result.metrics.delta_records_scanned = 0;
+    result.metrics.delta_records_scanned = delta_scanned;
     result.metrics.candidate_limit_reached = expansion.candidate_limit_reached;
     result.metrics.elapsed_ns = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -313,6 +673,30 @@ Result<StoredVector> Engine::Get(VectorId id) {
     std::shared_lock guard(impl.mutex);
     if (impl.closed) return Failure(ErrorCode::closed, "Engine is closed");
     const auto& view = impl.view;
+
+    // The delta answers first when it holds a newer version, because the graph
+    // predates it. Both sides are filtered by the captured snapshot, so a Get
+    // that started before a write cannot return the newer record.
+    std::uint32_t delta_slot = 0;
+    Sequence delta_version = 0;
+    bool has_delta = false;
+    if (impl.delta) {
+        for (std::uint32_t delta_index = 0; delta_index < view.delta_count; ++delta_index) {
+            const auto& pin = view.deltas[delta_index];
+            if (pin.segment != impl.delta->CurrentSegmentId()) continue;
+            for (std::uint32_t index = 0; index < pin.committed_prefix; ++index) {
+                if (impl.delta->IdAt(index) != id) continue;
+                const auto version = impl.delta->VersionAt(index);
+                if (version > view.snapshot_sequence) continue;
+                if (!has_delta || version > delta_version) {
+                    has_delta = true;
+                    delta_version = version;
+                    delta_slot = index;
+                }
+            }
+        }
+    }
+
     std::optional<VersionDirectoryEntry> best;
     for (std::uint32_t index = 0; index < view.segment_count; ++index) {
         const auto found = impl.access->FindId(view.segments[index].id, id);
@@ -321,6 +705,16 @@ Result<StoredVector> Engine::Get(VectorId id) {
         if (!entry.has_value()) continue;
         if (entry->version > view.snapshot_sequence) continue;
         if (!best.has_value() || best->version < entry->version) best = entry;
+    }
+
+    if (has_delta && (!best.has_value() || best->version < delta_version)) {
+        StoredVector stored;
+        stored.id = id;
+        stored.version = delta_version;
+        stored.snapshot_sequence = view.snapshot_sequence;
+        const auto values = impl.delta->ValuesAt(delta_slot);
+        stored.values.assign(values.begin(), values.end());
+        return stored;
     }
     if (!best.has_value()) return Failure(ErrorCode::not_found, "Logical ID is not visible");
     for (std::uint32_t index = 0; index < view.segment_count; ++index) {
@@ -336,21 +730,23 @@ Result<StoredVector> Engine::Get(VectorId id) {
     return Failure(ErrorCode::not_found, "Logical ID could not be read back");
 }
 
-Result<WriteReceipt> Engine::Insert(VectorId, std::span<const float>, const WriteOptions&) {
-    return Failure(ErrorCode::unsupported,
-                   "The static baseline has no write path; WAL and delta stores arrive with the "
-                   "dynamic stage");
+Result<WriteReceipt> Engine::Insert(VectorId id, std::span<const float> values,
+                                   const WriteOptions& options) {
+    if (!impl_) return Failure(ErrorCode::closed, "Engine is closed");
+    return impl_->ApplyWrite(WalOperation::insert, id, values, options);
 }
 
-Result<WriteReceipt> Engine::Upsert(VectorId, std::span<const float>, const WriteOptions&) {
-    return Failure(ErrorCode::unsupported,
-                   "The static baseline has no write path; WAL and delta stores arrive with the "
-                   "dynamic stage");
+Result<WriteReceipt> Engine::Upsert(VectorId id, std::span<const float> values,
+                                   const WriteOptions& options) {
+    if (!impl_) return Failure(ErrorCode::closed, "Engine is closed");
+    return impl_->ApplyWrite(WalOperation::upsert, id, values, options);
 }
 
-Result<CheckpointReceipt> Engine::Checkpoint(std::chrono::milliseconds) {
+Result<CheckpointReceipt> Engine::Checkpoint(std::chrono::milliseconds timeout) {
+    if (timeout.count() <= 0)
+        return Failure(ErrorCode::invalid_argument, "Checkpoint timeout must be positive");
     return Failure(ErrorCode::unsupported,
-                   "The static baseline has no checkpoint path; there is nothing to flush");
+                   "Checkpoint needs the maintenance stage: the delta is durable in the WAL");
 }
 
 Result<EngineStats> Engine::Stats() const {
@@ -358,12 +754,12 @@ Result<EngineStats> Engine::Stats() const {
     const Impl& impl = *impl_;
     std::shared_lock guard(impl.mutex);
     EngineStats stats;
-    stats.published_sequence = 0;
+    stats.published_sequence = impl.published_sequence;
     stats.checkpoint_sequence = impl.manifest.checkpoint_sequence;
     stats.view_generation = impl.view.view_generation;
     stats.live_vectors = impl.live_count;
     if (impl.governor) stats.memory_accounted_bytes = MemoryAccountedBytes(*impl.governor);
-    stats.delta_resident_bytes = 0;
+    stats.delta_resident_bytes = impl.delta_resident_bytes;
     stats.retired_pinned_bytes = 0;
     if (impl.backend) {
         const auto counters = impl.backend->Stats();
@@ -382,11 +778,11 @@ Result<EngineStats> Engine::Stats() const {
         stats.peak_inflight_reads = reads.peak_inflight_reads;
         stats.peak_prefetch_reads = reads.peak_prefetch_reads;
     }
-    stats.wal_bytes_written = 0;
+    stats.wal_bytes_written = impl.wal_bytes_written;
     stats.checkpoint_bytes_written = 0;
     stats.merge_bytes_written = 0;
-    stats.logical_update_bytes = 0;
-    stats.pending_write_count = 0;
+    stats.logical_update_bytes = impl.logical_update_bytes;
+    stats.pending_write_count = impl.pending_writes.load();
     stats.merge_backlog_bytes = 0;
     return stats;
 }

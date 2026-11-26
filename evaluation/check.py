@@ -954,7 +954,8 @@ def _evaluate(run_dir):
             result["notes"].append(
                 "Raw Job high-water mark exceeds the limit; retain the original evidence "
                 "and investigate rejected allocations before resource acceptance.")
-        (run_dir / "evaluation.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        (run_dir / "evaluation.json").write_text(
+            json.dumps(result, indent=2) + "\n", encoding="utf-8", newline="\n")
         return result
 
     prefixes, updates, sequences = replay_prefixes(base, write_rows, snapshots)
@@ -1048,7 +1049,7 @@ def _evaluate(run_dir):
         ],
     }
     (run_dir / "evaluation.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     return result
 
 
@@ -1060,7 +1061,7 @@ def evaluate(run_dir):
     except (ContractError, OSError, ValueError, KeyError, TypeError) as error:
         if run_dir.is_dir():
             report.write_text(json.dumps({"verdict": "invalid", "diagnostic": str(error)}) + "\n",
-                              encoding="utf-8")
+                              encoding="utf-8", newline="\n")
         raise
 
 

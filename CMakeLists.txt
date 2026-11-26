@@ -14,7 +14,7 @@ target_compile_features(agent_io_index_contracts PRIVATE cxx_std_20)
 add_library(agent_io_index STATIC
     src/index/json.cpp src/index/digest.cpp src/index/format.cpp
     src/index/manifest.cpp src/index/scratch.cpp src/index/adapter.cpp
-    src/index/builder.cpp)
+    src/index/builder.cpp src/index/delta.cpp src/index/recovery.cpp)
 target_include_directories(agent_io_index PUBLIC include)
 target_compile_features(agent_io_index PUBLIC cxx_std_20)
 target_compile_definitions(agent_io_index PRIVATE
@@ -53,6 +53,12 @@ target_link_libraries(benchmark_runner_test PRIVATE agent_io_benchmark)
 add_executable(index_engine_test tests/index/index-engine-test.cpp)
 target_link_libraries(index_engine_test PRIVATE agent_io_engine)
 
+add_executable(dynamic_engine_test tests/index/dynamic-engine-test.cpp)
+target_link_libraries(dynamic_engine_test PRIVATE agent_io_engine)
+
+add_executable(write_probe tools/dynamic/write-probe.cpp)
+target_link_libraries(write_probe PRIVATE agent_io_engine)
+
 add_executable(synchronous_storage_test tests/storage/synchronous-storage-test.cpp)
 target_link_libraries(synchronous_storage_test PRIVATE agent_io_storage)
 target_compile_definitions(synchronous_storage_test PRIVATE
@@ -79,7 +85,8 @@ if(MSVC)
     foreach(target agent_io_contracts agent_io_index_contracts
                    agent_io_storage agent_io_index agent_io_engine
                    agent_io_benchmark benchmark_runner_test index_engine_test
-                   synchronous_storage_test wal_test vector_build
+                   dynamic_engine_test
+                   synchronous_storage_test wal_test vector_build write_probe
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
     endforeach()
@@ -154,6 +161,8 @@ if(TARGET vector_bench AND EXISTS "${AGENT_IO_TEST_PYTHON}")
 endif()
 add_test(NAME index_engine COMMAND index_engine_test)
 set_tests_properties(index_engine PROPERTIES TIMEOUT 120)
+add_test(NAME dynamic_engine COMMAND dynamic_engine_test)
+set_tests_properties(dynamic_engine PROPERTIES TIMEOUT 180)
 if(TARGET vector_build AND EXISTS "${AGENT_IO_TEST_PYTHON}")
     # The refusal matrix: every rejected configuration must leave the published
     # index byte-identical, so this has to run against the real binaries.

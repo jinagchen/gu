@@ -396,10 +396,18 @@ void TestBuildAndSearch(Fixture& fixture) {
     Require(std::holds_alternative<Error>(engine->Search(query, over)),
             "K above the candidate limit is rejected");
 
-    Require(std::holds_alternative<Error>(engine->Insert(1, query, WriteOptions{})),
-            "static baseline has no write path");
+    // The baseline is now writable: a durable write appended to a static index
+    // must be acknowledged and survive as a new version, not be rejected.
+    const auto appended = engine->Insert(1, query, WriteOptions{});
+    Require(std::holds_alternative<WriteReceipt>(appended),
+            "the baseline accepts a durable write");
+    if (std::holds_alternative<WriteReceipt>(appended))
+        Require(std::get<WriteReceipt>(appended).sequence == 1,
+                "the first durable write takes sequence 1");
+    Require(std::holds_alternative<StoredVector>(engine->Get(1)),
+            "the durable write is readable on the baseline");
     Require(std::holds_alternative<Error>(engine->Checkpoint(std::chrono::milliseconds(10))),
-            "static baseline has no checkpoint path");
+            "checkpoint remains unsupported until maintenance lands");
 
     // A second engine on the same directory must fail through the LOCK file.
     auto locked = Engine::Open(fixture.index, options);
