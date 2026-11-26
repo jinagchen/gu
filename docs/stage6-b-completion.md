@@ -1,6 +1,36 @@
 # 第六阶段 B 侧交付：动态写入的确认、可见与恢复
 
-2026 年 11 月 25 日完成。A 侧的 [WAL 底层](stage6-a-wal.md)提供编解码、追加、刷盘与轮换；本文件交付它之上的引擎闭环：序号分配、增量层发布、查询融合、恢复重放，以及这些环节的故障测试与实测成本。
+2026 年 11 月 25 日完成初版，11 月 26 日补齐 WAL 残尾修复与新日志文件头发布。A 侧的 [WAL 底层](stage6-a-wal.md)提供编解码、追加、刷盘与轮换。本文件记录引擎闭环、故障测试与初版实测成本。
+
+## 2026 年 11 月 26 日恢复修复
+
+- **根因**。第一次 `Open` 只在内存中跳过最新日志的半帧。续写创建新 `.log` 后，原日志变成历史文件，第二次 `Open` 将遗留的半帧判为 `corruption`。
+- **处理顺序**。持有实例独占锁，完成只读扫描、增量预算检查和重放后，独占复核最新 WAL 的文件身份、文件头和扫描长度。在同一句柄上截去合法残尾并刷盘。每次 `Open` 都刷盘已验证的最新 WAL，包括长度已经正常的重试。失败返回原生错误码，成功后才发布视图。
+- **日志接管与发布**。起始序号等于下一写入序号的空 `.log` 由恢复直接接管。新 WAL 先写入并刷盘同目录唯一 `.pending`，再同卷改名发布且禁止覆盖。业务帧在重开并复核正式文件后才能追加。创建或轮换遇到 I/O 错误后，当前实例停止写入，须重新 `Open`。
+- **复现对照**。独立夹具确认序号 1 后，只追加序号 2 的合法帧前缀。旧实现下子进程首次恢复、确认序号 2 并强制退出，父进程第二次 `Open` 因 `Non-final WAL file ends inside a frame` 失败，`dynamic_engine` 为 180 项断言、1 失败，`wal` 通过。修复后第二次打开读回序号 1 和 2 的 ID、版本与向量，下一次写入确认序号 3。
+- **故障覆盖**。包含头部空日志、首帧撕裂与轮换后首帧撕裂、截断后的刷盘失败和进程退出、已同步未回复的完整帧、`.pending` 写入/同步/改名失败、目标名冲突、发布后接管失败、身份/长度/头复核失败，以及损坏日志逐字节不变。
+- **边界**。旧版本造成的历史 WAL 残尾仍返回 `corruption`。当前扫描仍在内存收集日志和重放记录，缺少大历史的独立恢复内存上限。每次打开最新 WAL 会增加一次刷盘。未运行物理断电试验或重测下方历史性能数据，文件名的断电持久化仍待验证。`Checkpoint` 和 WAL 自动回收仍未启用。
+
+实际验证使用 Windows x64、MSVC 19.43.34810、NTFS 和 LF 源码，`TEMP` 与 `TMP` 均指向 `D:/agent-io-walfix-20261126/tmp`。构建目录由 `cmake -G "Visual Studio 17 2022" -A x64` 配置，启用了仓库的 Python 检查与固定 Boost 依赖。
+
+| 验证 | Debug | Release |
+| --- | --- | --- |
+| `wal` / `dynamic_engine` 专项 | 2/2 通过，动态测试 424 项断言全部通过 | 2/2 通过，动态测试 424 项断言全部通过 |
+| 全量 CTest | 14/14 通过，25.66 秒 | 14/14 通过，24.42 秒 |
+
+```powershell
+$build = 'D:/agent-io-walfix-20261126/build'
+foreach ($config in 'Debug', 'Release') {
+    cmake --build $build --config $config --target wal_test dynamic_engine_test --parallel
+    ctest --test-dir $build -C $config -R '^(wal|dynamic_engine)$' --output-on-failure -V
+}
+foreach ($config in 'Debug', 'Release') {
+    cmake --build $build --config $config --parallel
+    ctest --test-dir $build -C $config --output-on-failure
+}
+```
+
+本机测试日志位于 `D:/agent-io-walfix-20261126/ctest-*.log`。
 
 ## 结论
 
@@ -19,7 +49,7 @@
 | `src/index/delta.hpp` / `delta.cpp` | 稳定槽位增量层：预约、写入、单调发布前缀、冻结、预算记账 |
 | `src/index/recovery.hpp` / `recovery.cpp` | WAL 目录扫描：实例身份、序号连续性、尾部截断与重放 |
 | `src/engine/engine.cpp` | `Open` 接入恢复、`Insert`/`Upsert`/`Get`/`Search`/`Stats` 接入增量层 |
-| `tests/index/dynamic-engine-test.cpp` | 动态正确性与故障测试（187 项） |
+| `tests/index/dynamic-engine-test.cpp` | 动态正确性与故障测试 |
 | `tools/dynamic/write-probe.cpp` | 确认与可见延迟、恢复耗时的测量探针 |
 | `tools/dynamic/run-stage6-b.py` | 三档写入量的测量驱动与不变量校验 |
 | `tools/dynamic/plot-stage6-b.py` | 证据图 |
@@ -62,13 +92,14 @@
 
 ### 恢复
 
-`Open` 在建好只读快照之后、返回引擎之前完成重放：
+`Open` 在返回引擎之前完成重放：
 
 1. 扫描 `wal/` 下所有 `.log`，读**文件头**取实例身份与起始序号。文件名只用于区分文件，不用于判定新旧。
 2. 拒绝外来实例、重复起始序号、序号断档。
 3. 逐帧解码；只有**最新**文件允许以不完整帧结尾（那是从未被确认的写），历史文件出现短尾按 `corruption` 处理——轮换只发生在已同步的组之间，历史文件缺尾意味着已承诺的字节丢了。
 4. 跳过 `≤ checkpoint_sequence` 的记录，其余按顺序重放进增量层，并恢复已发布序号。
 5. 存活数按 **ID** 统计，不按记录数：同一 ID 的多条记录只算一个，已存在于段中的 ID 不重复计数。写入路径用的就是这条口径，恢复若按记录数累加，重启后 `live_vectors` 就会比重启前偏大。
+6. 重放完成后修复并同步最新 WAL，需要时接管其空文件，然后再发布可读视图。
 
 重放是幂等的：日志里没有"已应用"标记，状态完全由记录序列重建，因此重复打开不会重复应用。
 
@@ -78,7 +109,7 @@
 
 ## 正确性测试
 
-`dynamic_engine_test` 共 **187 项断言、0 失败**。覆盖与验收条目的对应关系：
+初版 `dynamic_engine_test` 有 **187 项断言、0 失败**。覆盖与验收条目的对应关系如下，11 月 26 日的新增用例和验证见上方修复记录。
 
 | 验收要求 | 用例 | 断言要点 |
 | --- | --- | --- |
@@ -92,7 +123,7 @@
 | 重复恢复不重复应用 | 同上 | 第二次打开后序号不再增长 |
 | 恢复后可续写 | 同上 | 下一条写入的序号 = 恢复序号 + 1，而非从 1 重来 |
 | 存活数按 ID 计 | `TestRecoveryLiveCountCountsIds` | 同一 ID 写两个版本、再覆盖一条段中已有的向量，存活数只加 1；重启后与重启前相等 |
-| 日志尾部截断 | `TestTruncatedTailIsDiscarded` | 截掉半帧后，只有最后一条消失；存活数减一；前一条仍可读 |
+| 日志残尾修复 | `TestTornTailThenConfirmedWriteSurvivesAnotherOpen` | 追加未确认帧前缀，恢复并确认下一次写入，强制结束后再次打开验证两条已确认记录 |
 | 损坏帧不静默放过 | `TestCorruptFrameIsRefused` | 翻转载荷一个字节使 CRC 失配，打开返回 `corruption` 而非丢弃该帧继续 |
 | 历史文件缺尾是损坏 | `TestHistoricalShortTailIsRefused` | 用 400 字节轮换上限制造多文件，截短第一个文件后打开返回 `corruption` |
 | 拒绝路径不留下痕迹 | `TestRefusals` | 零 ID、维度不符、非有限值、零超时全部被拒；已发布序号与存活数不变 |
