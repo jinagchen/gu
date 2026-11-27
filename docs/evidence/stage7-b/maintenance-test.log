@@ -1,0 +1,24 @@
+case CheckpointPublishesWithoutChangingAnswers      checks=13 failures=0
+case RestartAfterCheckpointDoesNotReplay            checks=22 failures=0
+case MergesKeepSegmentsBounded                      checks=96 failures=0
+case MergeSurvivesRestart                           checks=39 failures=0
+case QueryResultsSurviveMerge                       checks=13 failures=0
+switch: answered=928 failures=0 drifted=0 generations=10
+case QueriesAnswerAcrossGenerationSwitches          checks=122 failures=0
+case BackgroundMaintenanceFlushesWithoutACall       checks=29 failures=0
+policy off          writes=80 unreadable=0 ckpt_bytes=0 merge_bytes=0 peak_backlog=6400 peak_dirs=1 final_dirs=1 undrained=0 budget=1 elapsed_ms=105
+policy flush        writes=80 unreadable=0 ckpt_bytes=371422 merge_bytes=0 peak_backlog=800 peak_dirs=9 final_dirs=10 undrained=0 budget=1 elapsed_ms=789
+policy flush+merge  writes=80 unreadable=0 ckpt_bytes=366568 merge_bytes=3548684 peak_backlog=800 peak_dirs=4 final_dirs=3 undrained=0 budget=1 elapsed_ms=865
+policy min-6MiB     writes=80 unreadable=0 ckpt_bytes=381130 merge_bytes=0 peak_backlog=800 peak_dirs=10 final_dirs=12 undrained=0 budget=1 elapsed_ms=973
+case MaintenancePolicyAblation                      checks=31 failures=0
+rate 50       declared=50/s achieved=50/s think_ms=1 attempted=150 accepted=150 refused=0 unreadable=0 queries=533 qfail=0 early_peak=960 late_peak=720 peak_dirs=5 final_dirs=2 undrained=0 budget=1 elapsed_ms=2983 drain_ms=57
+rate 100      declared=100/s achieved=100/s think_ms=1 attempted=300 accepted=300 refused=0 unreadable=0 queries=432 qfail=0 early_peak=1920 late_peak=1920 peak_dirs=5 final_dirs=3 undrained=0 budget=1 elapsed_ms=2997 drain_ms=131
+rate 200      declared=200/s achieved=194/s think_ms=1 attempted=585 accepted=585 refused=0 unreadable=0 queries=250 qfail=0 early_peak=3840 late_peak=4480 peak_dirs=4 final_dirs=2 undrained=0 budget=1 elapsed_ms=3009 drain_ms=158
+rate 400      declared=400/s achieved=258/s think_ms=1 attempted=773 accepted=773 refused=0 unreadable=0 queries=188 qfail=0 early_peak=5760 late_peak=6160 peak_dirs=5 final_dirs=2 undrained=0 budget=1 elapsed_ms=3000 drain_ms=118
+rate control  declared=200/s achieved=200/s think_ms=1 attempted=600 accepted=600 refused=0 unreadable=0 queries=1320 qfail=0 early_peak=16000 late_peak=48000 peak_dirs=1 final_dirs=1 undrained=1 budget=1 elapsed_ms=2998 drain_ms=0
+rate declared-tight declared=200/s achieved=90/s think_ms=0 attempted=185 accepted=185 refused=0 unreadable=0 queries=2232 qfail=0 early_peak=3040 late_peak=4480 peak_dirs=5 final_dirs=2 undrained=0 budget=1 elapsed_ms=2056 drain_ms=89
+read pressure: think=1ms achieved=194/s | think=0 achieved=90/s
+case SustainedWriteRate                             checks=35 failures=0
+settle-rule on: ckpt=3 backlog=0 | off: ckpt=0 backlog=240
+case SettleRuleIsAblatable                          checks=15 failures=0
+maintenance: 415 checks, 0 failures

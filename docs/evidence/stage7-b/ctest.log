@@ -1,0 +1,23 @@
+Test project D:/比赛/gu-main/gu-main/build/release
+    Start 1: benchmark_runner
+1/9 Test #1: benchmark_runner .................   Passed    0.82 sec
+    Start 2: index_engine
+2/9 Test #2: index_engine .....................   Passed    0.25 sec
+    Start 3: dynamic_engine
+3/9 Test #3: dynamic_engine ...................   Passed    3.27 sec
+    Start 4: maintenance
+4/9 Test #4: maintenance ......................   Passed   26.74 sec
+    Start 5: synchronous_storage
+5/9 Test #5: synchronous_storage ..............   Passed    0.91 sec
+    Start 6: wal
+6/9 Test #6: wal ..............................   Passed    0.32 sec
+    Start 7: windows_environment_probe
+7/9 Test #7: windows_environment_probe ........   Passed    0.04 sec
+    Start 8: job_process_tree
+8/9 Test #8: job_process_tree .................   Passed    0.36 sec
+    Start 9: job_commit_rejection
+9/9 Test #9: job_commit_rejection .............   Passed    0.09 sec
+
+100% tests passed out of 9
+
+Total Test time (real) =  32.89 sec
