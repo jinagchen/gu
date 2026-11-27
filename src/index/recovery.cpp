@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <limits>
 
 namespace agent_io {
@@ -162,6 +163,58 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
         report.files.push_back(std::move(summary));
     }
     return report;
+}
+
+Result<std::uint64_t> RecycleWalFiles(const std::filesystem::path& wal_directory,
+                                      const InstanceId& instance_id, Sequence up_to,
+                                      std::uint64_t* failed) {
+    if (failed != nullptr) *failed = 0;
+    if (AllZero(instance_id))
+        return Error{ErrorCode::invalid_argument, "Reclamation needs an instance identity"};
+    std::error_code error;
+    if (!std::filesystem::is_directory(wal_directory, error)) return std::uint64_t{0};
+
+    std::uint64_t removed = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(wal_directory, error)) {
+        if (error) return Error{ErrorCode::io_error, "Cannot list the WAL directory"};
+        if (!entry.is_regular_file(error) || error) continue;
+        const auto name = entry.path().filename().string();
+        if (name.size() < 5 || name.compare(name.size() - 4, 4, ".log") != 0) continue;
+        // The header is read and the stream closed before the file is touched
+        // again: Windows refuses to delete a file whose reader still holds it,
+        // and an open handle here would turn every reclamation into a no-op.
+        WalFileHeader decoded{};
+        bool usable = false;
+        {
+            std::ifstream input(entry.path(), std::ios::binary);
+            if (input) {
+                std::vector<std::byte> header_bytes(kHeaderBytes);
+                input.read(reinterpret_cast<char*>(header_bytes.data()),
+                           static_cast<std::streamsize>(header_bytes.size()));
+                if (input.gcount() == static_cast<std::streamsize>(kHeaderBytes)) {
+                    const auto header =
+                        DecodeWalFileHeader(std::span<const std::byte>(header_bytes));
+                    if (std::holds_alternative<WalFileHeader>(header)) {
+                        decoded = std::get<WalFileHeader>(header);
+                        usable = SameInstance(decoded.instance_id, instance_id);
+                    }
+                }
+            }
+        }
+        if (!usable) {
+            // A file that cannot be read or does not belong to this instance is
+            // left alone; deleting it would be a guess.
+            if (failed != nullptr) ++*failed;
+            continue;
+        }
+        if (decoded.start_sequence > up_to) continue;
+        std::error_code remove_error;
+        if (std::filesystem::remove(entry.path(), remove_error))
+            ++removed;
+        else if (failed != nullptr)
+            ++*failed;
+    }
+    return removed;
 }
 
 }  // namespace agent_io

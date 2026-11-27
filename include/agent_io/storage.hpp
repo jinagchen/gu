@@ -94,6 +94,9 @@ public:
 };
 
 // Retire follows B's durable publication decision; existing leases stay readable.
+// A retired file's handle is released once nothing pins it, which is what makes
+// its directory deletable on Windows. CollectRetired() drops those entries and
+// is safe to call repeatedly; entries still pinned stay registered.
 class FileRegistry {
 public:
     virtual ~FileRegistry() = default;
