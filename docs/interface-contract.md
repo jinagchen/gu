@@ -2,7 +2,7 @@
 
 契约版本 API-1.2，日期 2026 年 11 月 11 日，对应 DESIGN-1.1 [总体设计](architecture.md)。1.1 确定 Windows IOCP；1.2 补充第三阶段 A 的 BlockReader、文件回收、预算模式、读取调度、WAL 编码与基准交接。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
 
-截至 2026 年 11 月 27 日，`Engine` 支持 `Open`、`Search`、`Get`、`Insert`、`Upsert`、`Stats`、`QuiesceReads` 和 `Close`。`Open` 独占 `LOCK`，校验索引并重放 WAL。`Insert` 和 `Upsert` 在 WAL 刷盘、发布增量前缀后返回成功收据。`Checkpoint` 仍返回 `unsupported`。[项目状态](project-status.md)
+截至 2026 年 11 月 23 日，`Engine` 可链接并支持静态 `Open`、`Search`、`Get`、`Stats`、`QuiesceReads` 和 `Close`。`Open` 独占 `LOCK` 并校验索引，不做 WAL 重放；`Insert`、`Upsert`、`Checkpoint` 固定返回 `unsupported`。下文的动态语义是冻结契约，不是已交付行为。[项目状态](project-status.md)
 
 ## 1 类型和返回值
 
@@ -41,7 +41,7 @@ write_effect 默认 none。只有写入可能进入 WAL 后的不可确定错误
 | Stats() | Result<EngineStats> | 有界计量快照；多计数非原子一致，不能代替查询视图 |
 | Close() | Result<Success> | 停新请求、排空、报告错误；重复成功关闭幂等 |
 
-索引首次创建由 `vector_build` 负责。输入、Job 限额及 staging 发布规则见 [B 侧契约](stage3-b-contract.md)与 [build-run.json](../configs/examples/build-run.json)，拒绝矩阵见[第四阶段 B 交付](stage4-b-completion.md)。`Insert` 和 `Upsert` 已提供 WAL 同步。`Checkpoint` 的数据段与清单覆盖仍是目标契约。删除、事务组和历史 Search API 不在接口范围内。
+索引首次创建由 `vector_build` 负责，输入参数、独立 Job 限额与 staging 发布规则见 [B 侧契约](stage3-b-contract.md)及 [build-run.json](../configs/examples/build-run.json)；拒绝矩阵见[第四阶段 B 交付](stage4-b-completion.md)。按目标契约，写入同步由 `Insert`/`Upsert` 保证，`Checkpoint` 专指数据段与清单覆盖；当前不能调用它们执行这些操作。没有删除、事务组和历史 Search API。
 
 Get 返回的 `version` 是该向量最后修改序号，`snapshot_sequence` 是操作读取的整体快照，两者不必相同。Search 的每个版本不得大于 S，且不得存在同一 ID 的更高可见版本。
 

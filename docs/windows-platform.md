@@ -14,8 +14,8 @@
 | 绕过系统文件数据缓存 | FILE_FLAG_NO_BUFFERING | 本机临时文件探针通过，不宣称绕过设备缓存 |
 | 异步读取 | FILE_FLAG_OVERLAPPED + IOCP | 独立探针及真实静态 Engine 已验证；混合负载待验 |
 | 缓冲对齐 | FileStorageInfo 探测，按逻辑/物理扇区和块大小分配 | 本次逻辑扇区 512 字节，保守地址对齐 4096 字节；正式数据卷需重新探测 |
-| WAL 写入与刷盘 | 普通顺序 WriteFile + FlushFileBuffers | Engine 已接入，覆盖进程终止后重放、残尾修复和恢复后续写 |
-| 目录独占 | 独占打开 LOCK 的 HANDLE，生命周期覆盖 Engine | 静态打开与动态恢复均持有实例独占锁 |
+| WAL 写入与刷盘 | 普通顺序 WriteFile + FlushFileBuffers | 已有底层轮换、失败与进程终止用例；未接入 Engine，不等于断电恢复 |
+| 目录独占 | 独占打开 LOCK 的 HANDLE，生命周期覆盖 Engine | 静态 Engine 已实现；动态恢复编排尚未接入 |
 | 内存限制 | 独立 benchmark Job Object 设置提交内存限额 | 已有启动器、子进程归属、提交拒绝及小数据构建/查询/重建计量；官方口径未关闭 |
 
 每个已接管异步请求持有文件、缓冲和 OVERLAPPED，最终完成前不得回收。默认完成模式下 ReadFile 立即成功也会产生 IOCP 完成通知；只能处理一次业务完成。第一版不启用跳过成功通知的优化，不以 CancelIoEx 返回成功代替实际完成。
@@ -26,7 +26,7 @@
 
 不将 Linux 的 fdatasync、rename 和目录 fsync 调用逐字搬到 Windows。
 
-写入在 WAL 完整追加且 `FlushFileBuffers` 成功后发布内存视图，并返回成功收据。`Open` 在实例独占锁下重放 WAL，并校验和修复最新日志的合法残尾后才发布视图。本机 NTFS 测试覆盖进程终止、再次打开和恢复后续写。[WAL 底层](stage6-a-wal.md) · [引擎恢复](stage6-b-completion.md#2026-年-11-月-26-日恢复修复)
+目标写入顺序是 WAL 完整追加并 `FlushFileBuffers` 成功，再发布内存视图、确认写入。[WAL 底层](stage6-a-wal.md)已验证文件创建、轮换和进程终止后的截断观察；Engine 打开后的重放、尾部处理及恢复后续写仍待验证，不承诺断电安全。
 
 新段及清单使用唯一文件名，关闭或刷盘后才允许被发布清单引用。CURRENT 替换拟用 ReplaceFileW，首次创建拟用同卷 MoveFileExW；完整步骤见[存储协议](storage-protocol.md)。ReplaceFileW 的 REPLACEFILE_WRITE_THROUGH 标志不受支持，不能借此声称已同步目录。
 
