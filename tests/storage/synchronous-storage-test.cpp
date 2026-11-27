@@ -199,7 +199,11 @@ void CheckReads(Fixture& fixture, bool direct) {
         [](Result<ReadCompletion> done) { Take(std::move(done)); }));
     alias.reset();
     file.reset();
-    Expect(registry->CollectRetired(), ErrorCode::unsupported);
+    // Once nothing pins the file the retired entry is released, so the caller
+    // may delete the path and the identity may even be registered again. A
+    // retired entry that is still pinned stays registered until the next call.
+    Take(registry->CollectRetired());
+    Take(registry->Open(fixture.alias));
     Require(std::filesystem::exists(fixture.path), "Retirement deleted file");
     Take(backend->Drain());
     Take(backend->Drain());

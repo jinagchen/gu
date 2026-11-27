@@ -406,8 +406,16 @@ void TestBuildAndSearch(Fixture& fixture) {
                 "the first durable write takes sequence 1");
     Require(std::holds_alternative<StoredVector>(engine->Get(1)),
             "the durable write is readable on the baseline");
-    Require(std::holds_alternative<Error>(engine->Checkpoint(std::chrono::milliseconds(10))),
-            "checkpoint remains unsupported until maintenance lands");
+    // Stage 7 makes an explicit checkpoint work even without background
+    // maintenance: the write above moves from the delta into a new segment.
+    const auto checkpointed = engine->Checkpoint(std::chrono::milliseconds(5000));
+    Require(std::holds_alternative<CheckpointReceipt>(checkpointed),
+            "an explicit checkpoint flushes the delta");
+    if (std::holds_alternative<CheckpointReceipt>(checkpointed))
+        Require(std::get<CheckpointReceipt>(checkpointed).checkpoint_sequence == 1,
+                "the checkpoint covers the acknowledged write");
+    Require(std::holds_alternative<StoredVector>(engine->Get(1)),
+            "the write stays readable across a checkpoint");
 
     // A second engine on the same directory must fail through the LOCK file.
     auto locked = Engine::Open(fixture.index, options);
