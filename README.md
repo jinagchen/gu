@@ -59,7 +59,16 @@ ctest --test-dir build/windows -C Release --output-on-failure
     --root D:/agent-io-runs --run-id static-001
 ```
 
-完整配置注册 14 项 CTest。2026 年 11 月 27 日在 `cd8af51` 的干净检出上重新配置和构建，Release 与 Debug 各通过 14/14。若配置日志出现 `vector_bench CLI disabled`，检查 `AGENT_IO_BOOST_INCLUDE`。若 Python 相关测试缺失，确认解释器已创建后重新运行 CMake 配置。验证 Debug 时，将构建和 CTest 命令中的 `Release` 换为 `Debug`。静态基线脚本固定使用 `build/windows/Release`。
+完整配置注册 14 项 CTest。2026 年 11 月 27 日在 `cd8af51` 的干净检出上重新配置和构建，Release 与 Debug 各通过 14/14。若配置日志出现 `vector_bench CLI disabled`，检查 `AGENT_IO_BOOST_INCLUDE`。若 Python 相关测试缺失，确认解释器已创建后重新运行 CMake 配置。静态基线脚本固定使用 `build/windows/Release`。
+
+手动运行 Debug 回归时，沿用上方的 `$boostInclude`，在独立目录 `build/windows-debug` 中配置并清空 DiskANN 源码路径。阶段二引导流程会在 `build/windows` 保留链接 Release DiskANN 的探针。
+
+```powershell
+cmake -S . -B build/windows-debug -G "Visual Studio 17 2022" -A x64 `
+    "-DAGENT_IO_BOOST_INCLUDE=$boostInclude" '-DAGENT_IO_DISKANN_ROOT:PATH='
+cmake --build build/windows-debug --config Debug
+ctest --test-dir build/windows-debug -C Debug --output-on-failure
+```
 
 静态基线运行 512 条 16 维向量、60 次查询，首次构建和查询分别使用 512 MiB 与 384 MiB 的 Windows Job 提交限额。输出位于 `D:/agent-io-runs/static-001/`，其中 `baseline-summary.json` 应显示 `verdict=pass` 和 `recall_at_k.mean=1.0`。重跑请更换 `--run-id`，或使用空目录。2026 年 11 月 27 日在 `cd8af51` 的干净检出上复现了上述基线。
 
