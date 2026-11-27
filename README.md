@@ -8,7 +8,7 @@
 | 赛题编号 | proj47 |
 | 赛题名称 | 面向 Agent 记忆的向量检索系统 I/O 优化 |
 
-技术路线为 C++20 核心加 Python 评测，当前平台为原生 Windows x64。**截至 2026 年 11 月 23 日，静态检索和读优化可运行，WAL 底层已交付，但 Engine 仍不能插入、更新或重放日志。** [项目状态与下一步](docs/project-status.md)集中记录能力、验证结果和验收缺口。
+技术路线为 C++20 核心加 Python 评测，当前平台为原生 Windows x64。**截至 2026 年 11 月 26 日，引擎支持静态检索、读路径优化和动态写入。插入与更新在 WAL 刷盘后发布并确认，重启打开索引时重放 WAL。** `Checkpoint` 和真实混合读写评测仍待完成。详见[第六阶段 B 交付](docs/stage6-b-completion.md)和[项目状态与下一步](docs/project-status.md)。
 
 华北区域赛**报名截止：2026 年 12 月 6 日**；**初赛作品提交截止：2026 年 12 月 11 日 23:59**（希冀赛题窗口）。准备完整工程、设计实现文档、过程资料、进展汇报幻灯片和仓库内解说视频；用队伍账号核对报名状态、提交入口和回执。[赛程与提交清单](docs/open-questions.md#已核实的赛程与提交信息)
 
@@ -49,9 +49,11 @@ Copyright 2026 proj47-RecallFlow contributors.
 - [第六阶段 A：WAL 底层](docs/stage6-a-wal.md)：FORMAT-1 编解码、顺序追加、刷盘、轮换和故障验证。
 - [第六阶段 B：动态闭环](docs/stage6-b-completion.md)：序号分配、增量层发布、查询融合与 WAL 重放；确认与可见延迟、恢复耗时和写放大的实测。
 
-公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 已按声明实现静态查询路径并能链接，写路径返回 `unsupported`；同步存储已有独立实现。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
+Engine 支持查询、`Insert` 和 `Upsert`，`Open` 会重放 WAL 并恢复增量层。`Checkpoint` 仍返回 `unsupported`。公开声明见 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。
 
-`vector_bench --target engine` 对真实静态索引执行查询；`--target contract-test` 只生成合成的协议检查工件，不可用于性能测量。动态轨迹与独立答案校验已具备工具和样例，但不等于 C++ 动态运行已接通。
+协议示例位于 `configs/examples` 和 `evaluation/examples`。阶段二小数据实测另见[验收记录](docs/stage2-completion.md)。
+
+`vector_bench --target engine` 对真实索引执行静态查询基准。`--target contract-test` 生成供协议检查使用的合成工件。动态轨迹与独立答案校验已有工具和样例，真实混合读写的 EVAL-1.1 工件生产端仍待接入。
 
 ## 两人分工
 
@@ -80,10 +82,10 @@ CMakeLists.txt
 include/agent_io/     核心公开接口
 src/storage/          同步与 Windows IOCP 读取、块缓存、预取和 WAL
 src/index/            清单与版本目录、首建与图适配
-src/engine/           静态查询引擎（写路径返回 unsupported）
+src/engine/           检索、动态写入与 WAL 恢复
 src/benchmark/        静态开放式并发基准运行器
 tools/                环境探针、基准与首建 CLI、契约自检与基线驱动
-tests/                静态检索、并发读和 WAL 底层故障测试
+tests/                静态检索、并发读、动态写入与 WAL 故障恢复测试
 evaluation/           Python 数据处理、实验编排和结果分析
 configs/              可复现实验配置
 docs/                 设计、实验方法和相关工作
