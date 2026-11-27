@@ -45,24 +45,33 @@ try {
         '-DCMAKE_CONFIGURATION_TYPES=Debug;Release', '-Wno-dev')
     Invoke-Checked $CMake @('--build', 'build/diskann', '--config', 'Release',
         '--target', 'build_disk_index', 'search_disk_index', '--parallel', '4')
-    Invoke-Checked $CMake @('-S', '.', '-B', 'build/windows',
-        '-G', 'Visual Studio 17 2022', '-A', 'x64',
-        "-DAGENT_IO_DISKANN_ROOT=$dependencyRoot",
-        "-DAGENT_IO_DISKANN_PACKAGES=$projectRoot/build/diskann/packages")
-    Invoke-Checked $CMake @('--build', 'build/windows', '--config', 'Release')
-    # Debug checks our contracts, I/O and launcher; DiskANN is a Release dependency.
-    Invoke-Checked $CMake @('--build', 'build/windows', '--config', 'Debug',
-        '--target', 'agent_io_contracts', 'windows_environment_probe', 'job_runner')
-    $ctest = Join-Path (Split-Path $CMake) 'ctest.exe'
-    foreach ($configuration in @('Release', 'Debug')) {
-        Invoke-Checked $ctest @('--test-dir', 'build/windows', '-C', $configuration, '-V')
-    }
     if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
         Invoke-Checked python @('-m', 'venv', '.venv')
     }
     $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
     Invoke-Checked $python @('-m', 'pip', 'install', '-r', 'evaluation/requirements.lock.txt')
     Invoke-Checked $python @('-m', 'pip', 'check')
+
+    $packages = Join-Path $projectRoot 'build/diskann/packages'
+    $boostInclude = Join-Path $packages 'boost/lib/native/include'
+    if (-not (Test-Path -LiteralPath (Join-Path $boostInclude 'boost/json/src.hpp'))) {
+        throw 'Pinned Boost.JSON headers not found in the DiskANN packages directory'
+    }
+    $configureArgs = @('-S', '.', '-G', 'Visual Studio 17 2022', '-A', 'x64',
+        "-DAGENT_IO_BOOST_INCLUDE=$boostInclude", "-DAGENT_IO_TEST_PYTHON=$python")
+    $ctest = Join-Path (Split-Path $CMake) 'ctest.exe'
+
+    Invoke-Checked $CMake ($configureArgs + @('-B', 'build/windows',
+        "-DAGENT_IO_DISKANN_ROOT=$dependencyRoot", "-DAGENT_IO_DISKANN_PACKAGES=$packages"))
+    Invoke-Checked $CMake @('--build', 'build/windows', '--config', 'Release')
+    Invoke-Checked $ctest @('--test-dir', 'build/windows', '-C', 'Release', '-V')
+
+    # The probe links the Release DiskANN library. The Debug suite only needs the core and Boost.JSON.
+    $debugBuild = 'build/windows-stage2-debug'
+    Invoke-Checked $CMake ($configureArgs + @('-B', $debugBuild, '-DAGENT_IO_DISKANN_ROOT='))
+    Invoke-Checked $CMake @('--build', $debugBuild, '--config', 'Debug')
+    Invoke-Checked $ctest @('--test-dir', $debugBuild, '-C', 'Debug', '-V')
+
     Invoke-Checked $python @('tools/environment/stage2.py', '--directory', $DataDirectory)
 }
 finally {
