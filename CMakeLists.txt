@@ -14,7 +14,8 @@ target_compile_features(agent_io_index_contracts PRIVATE cxx_std_20)
 add_library(agent_io_index STATIC
     src/index/json.cpp src/index/digest.cpp src/index/format.cpp
     src/index/manifest.cpp src/index/scratch.cpp src/index/adapter.cpp
-    src/index/builder.cpp src/index/delta.cpp src/index/recovery.cpp)
+    src/index/builder.cpp src/index/delta.cpp src/index/recovery.cpp
+    src/index/graph.cpp src/index/segment_writer.cpp src/index/publish.cpp)
 target_include_directories(agent_io_index PUBLIC include)
 target_compile_features(agent_io_index PUBLIC cxx_std_20)
 target_compile_definitions(agent_io_index PRIVATE

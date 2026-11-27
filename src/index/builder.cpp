@@ -2,6 +2,7 @@
 
 #include "digest.hpp"
 #include "format.hpp"
+#include "graph.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -65,114 +66,6 @@ std::uint64_t FreeBytes(const std::filesystem::path& path) {
     ULARGE_INTEGER available{};
     if (!GetDiskFreeSpaceExW(path.c_str(), &available, nullptr, nullptr)) return 0;
     return available.QuadPart;
-}
-
-double SquaredL2(const float* left, const float* right, std::uint32_t dimension) {
-    double total = 0.0;
-    for (std::uint32_t index = 0; index < dimension; ++index) {
-        const double delta = static_cast<double>(left[index]) - static_cast<double>(right[index]);
-        total += delta * delta;
-    }
-    return total;
-}
-
-struct Edge {
-    float distance = 0.0f;
-    std::uint32_t node = 0;
-};
-
-// Exact k nearest neighbours for the baseline. Graph quality is what matters
-// here, not build speed; the work bound keeps the run predictable.
-Result<std::vector<std::vector<Edge>>> BuildGraph(std::span<const float> vectors,
-                                                  std::uint64_t count,
-                                                  std::uint32_t dimension,
-                                                  std::uint32_t max_degree) {
-    if (count < 2) return std::vector<std::vector<Edge>>{};
-    const auto work = static_cast<unsigned long long>(count) * count * dimension;
-    if (work > kMaxBuildWork)
-        return Error{ErrorCode::unsupported,
-                     "Exact first build exceeds the baseline work bound; use a smaller "
-                     "fixture or connect the DiskANN builder"};
-    // The degree budget is split: nearest neighbours carry local accuracy, the
-    // remaining slots carry the long-range links that make the graph navigable.
-    // Reserving the slots up front matters, because trimming the adjacency list
-    // to max_degree by distance would drop every long-range link again.
-    std::uint32_t long_range = (std::max)(2u, max_degree / 4);
-    if (long_range >= max_degree) long_range = max_degree / 2;
-    const std::uint32_t nearest = max_degree - long_range;
-    std::vector<std::vector<Edge>> graph(static_cast<std::size_t>(count));
-    std::vector<Edge> best;
-    best.reserve(nearest + 1);
-    const auto farther = [](const Edge& left, const Edge& right) {
-        return left.distance < right.distance;
-    };
-    for (std::uint64_t node = 0; node < count; ++node) {
-        best.clear();
-        const float* base = vectors.data() + node * dimension;
-        for (std::uint64_t other = 0; other < count; ++other) {
-            if (other == node) continue;
-            const auto distance = static_cast<float>(
-                SquaredL2(base, vectors.data() + other * dimension, dimension));
-            const Edge candidate{distance, static_cast<std::uint32_t>(other)};
-            if (best.size() < nearest) {
-                best.push_back(candidate);
-                std::push_heap(best.begin(), best.end(), farther);
-            } else if (candidate.distance < best.front().distance) {
-                std::pop_heap(best.begin(), best.end(), farther);
-                best.back() = candidate;
-                std::push_heap(best.begin(), best.end(), farther);
-            }
-        }
-        std::sort(best.begin(), best.end(), farther);
-        graph[static_cast<std::size_t>(node)] = best;
-    }
-    // Reverse edges keep the graph strongly connected for nodes that no one
-    // selected; duplicates are removed and each list is re-trimmed by distance.
-    for (std::uint64_t node = 0; node < count; ++node) {
-        for (const auto& edge : graph[static_cast<std::size_t>(node)]) {
-            auto& reverse = graph[edge.node];
-            const auto duplicate = std::find_if(reverse.begin(), reverse.end(),
-                [node](const Edge& item) { return item.node == node; });
-            if (duplicate != reverse.end()) continue;
-            const float* left = vectors.data() + static_cast<std::size_t>(edge.node) * dimension;
-            const float* right = vectors.data() + node * dimension;
-            reverse.push_back(Edge{static_cast<float>(SquaredL2(left, right, dimension)),
-                                   static_cast<std::uint32_t>(node)});
-        }
-    }
-    for (std::uint64_t node = 0; node < count; ++node) {
-        auto& edges = graph[static_cast<std::size_t>(node)];
-        std::sort(edges.begin(), edges.end(), [](const Edge& left, const Edge& right) {
-            if (left.distance != right.distance) return left.distance < right.distance;
-            return left.node < right.node;
-        });
-        edges.erase(std::unique(edges.begin(), edges.end(),
-            [](const Edge& left, const Edge& right) { return left.node == right.node; }),
-            edges.end());
-        if (edges.size() > nearest) edges.resize(nearest);
-    }
-    // Long-range links: an exact kNN graph is disconnected when clusters are
-    // tight, and a disconnected graph cannot be searched from one entry point.
-    // XOR-with-powers-of-two edges form a symmetric hypercube lattice over the
-    // node ids, so every node is reachable in O(log count) hops from the entry
-    // point without pretending to be Vamana pruning.
-    for (std::uint64_t node = 0; node < count; ++node) {
-        auto& edges = graph[static_cast<std::size_t>(node)];
-        for (std::uint64_t offset = 1; offset < count && edges.size() < max_degree;
-             offset <<= 1) {
-            const auto candidate = static_cast<std::uint64_t>(
-                static_cast<std::uint32_t>(node) ^ static_cast<std::uint32_t>(offset));
-            if (candidate >= count || candidate == node) continue;
-            const bool present = std::any_of(edges.begin(), edges.end(),
-                [candidate](const Edge& item) { return item.node == candidate; });
-            if (present) continue;
-            const float* left = vectors.data() + static_cast<std::size_t>(node) * dimension;
-            const float* right = vectors.data() + static_cast<std::size_t>(candidate) * dimension;
-            edges.push_back(Edge{static_cast<float>(SquaredL2(left, right, dimension)),
-                                 static_cast<std::uint32_t>(candidate)});
-        }
-    }
-    return graph;
 }
 
 std::uint64_t CommitPeakBytes() {
@@ -291,9 +184,10 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
     const auto layout_status = ValidateLayout(layout, request.dimension, block_bytes);
     if (const auto* error = std::get_if<Error>(&layout_status)) return *error;
 
-    auto graph = BuildGraph(vectors, request.vector_count, request.dimension, request.max_degree);
+    auto graph = BuildAdjacency(vectors, request.vector_count, request.dimension,
+                                request.max_degree);
     if (const auto* error = std::get_if<Error>(&graph)) return *error;
-    const auto& adjacency = std::get<std::vector<std::vector<Edge>>>(graph);
+    const auto& adjacency = std::get<std::vector<std::vector<GraphEdge>>>(graph);
 
     // 3. Stage the segment files.
     std::filesystem::create_directories(request.staging_directory, path_error);
@@ -541,3 +435,4 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
 }
 
 }  // namespace agent_io
+
