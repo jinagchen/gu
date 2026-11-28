@@ -1,6 +1,7 @@
 param(
     [string]$DataDirectory = 'D:\agent-io-stage2\20261110',
-    [string]$CMake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+    [string]$CMake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe',
+    [string]$Python = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +12,13 @@ try {
         param([string]$Program, [string[]]$Arguments)
         & $Program @Arguments
         if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
+    }
+    function Test-PatchApplied {
+        param([string]$Repository, [string]$Patch)
+        # PowerShell 5.1 treats native stderr as an error during redirection.
+        $ErrorActionPreference = 'Continue'
+        & git -C $Repository apply --reverse --check $Patch 2>$null
+        return $LASTEXITCODE -eq 0
     }
     $dependencyRoot = Join-Path $projectRoot 'build\deps\DiskANN'
     $toolsRoot = Join-Path $projectRoot 'build\tools'
@@ -33,8 +41,7 @@ try {
     }
     Invoke-Checked git @('-C', $dependencyRoot, 'submodule', 'update', '--init', '--depth', '1')
     $patch = Join-Path $PSScriptRoot 'diskann-0.6.1.patch'
-    & git -C $dependencyRoot apply --reverse --check $patch 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-PatchApplied $dependencyRoot $patch)) {
         Invoke-Checked git @('-C', $dependencyRoot, 'apply', '--check', $patch)
         Invoke-Checked git @('-C', $dependencyRoot, 'apply', $patch)
     }
@@ -45,25 +52,36 @@ try {
         '-DCMAKE_CONFIGURATION_TYPES=Debug;Release', '-Wno-dev')
     Invoke-Checked $CMake @('--build', 'build/diskann', '--config', 'Release',
         '--target', 'build_disk_index', 'search_disk_index', '--parallel', '4')
+    $venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+    $versionCheck = 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)'
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        if ($Python) {
+            Invoke-Checked $Python @('-c', $versionCheck)
+            Invoke-Checked $Python @('-m', 'venv', '.venv')
+        } else {
+            Invoke-Checked py @('-3.12', '-m', 'venv', '.venv')
+        }
+    }
+    & $venvPython -c $versionCheck
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The project .venv must use Python 3.12. Move the existing .venv aside and run again.'
+    }
+    Invoke-Checked $venvPython @('-m', 'pip', 'install', '--only-binary=:all:', '-r',
+        'evaluation/requirements.lock.txt')
+    Invoke-Checked $venvPython @('-m', 'pip', 'check')
     Invoke-Checked $CMake @('-S', '.', '-B', 'build/windows',
         '-G', 'Visual Studio 17 2022', '-A', 'x64',
         "-DAGENT_IO_DISKANN_ROOT=$dependencyRoot",
-        "-DAGENT_IO_DISKANN_PACKAGES=$projectRoot/build/diskann/packages")
-    Invoke-Checked $CMake @('--build', 'build/windows', '--config', 'Release')
-    # Debug checks our contracts, I/O and launcher; DiskANN is a Release dependency.
-    Invoke-Checked $CMake @('--build', 'build/windows', '--config', 'Debug',
-        '--target', 'agent_io_contracts', 'windows_environment_probe', 'job_runner')
+        "-DAGENT_IO_DISKANN_PACKAGES=$projectRoot/build/diskann/packages",
+        "-DAGENT_IO_BOOST_INCLUDE=$projectRoot/build/diskann/packages/boost/lib/native/include",
+        "-DAGENT_IO_TEST_PYTHON=$venvPython")
     $ctest = Join-Path (Split-Path $CMake) 'ctest.exe'
     foreach ($configuration in @('Release', 'Debug')) {
+        Invoke-Checked $CMake @('--build', 'build/windows', '--config', $configuration,
+            '--parallel', '4')
         Invoke-Checked $ctest @('--test-dir', 'build/windows', '-C', $configuration, '-V')
     }
-    if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
-        Invoke-Checked python @('-m', 'venv', '.venv')
-    }
-    $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
-    Invoke-Checked $python @('-m', 'pip', 'install', '-r', 'evaluation/requirements.lock.txt')
-    Invoke-Checked $python @('-m', 'pip', 'check')
-    Invoke-Checked $python @('tools/environment/stage2.py', '--directory', $DataDirectory)
+    Invoke-Checked $venvPython @('tools/environment/stage2.py', '--directory', $DataDirectory)
 }
 finally {
     Pop-Location
