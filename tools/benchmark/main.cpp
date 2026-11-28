@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "engine-target.hpp"
 #include "agent_io/synchronous_storage.hpp"
+#include "../../src/index/digest.hpp"
 
 #include <windows.h>
 
@@ -54,7 +55,7 @@ std::uint32_t OptionNumber(const wchar_t* text) {
 constexpr const char* kOwnedArtifacts[] = {
     "effective-config.json", "environment.json", "counters.json", "summary.json",
     "queries.jsonl", "writes.jsonl", "samples.jsonl", "stdout.log", "stderr.log",
-    "evaluation.json"};
+    "evaluation.json", "receipts.jsonl"};
 
 void PrepareOutputDirectory(const std::filesystem::path& output) {
     std::error_code error;
@@ -148,15 +149,15 @@ public:
 };
 
 class Files final : public BenchmarkSink {
-    std::ofstream queries_, samples_;
+    std::ofstream queries_, samples_, writes_, receipts_;
+    bool mixed_;
 public:
-    explicit Files(const std::filesystem::path& directory)
+    explicit Files(const std::filesystem::path& directory, bool mixed = false)
         : queries_(directory / "queries.jsonl", std::ios::binary),
-          samples_(directory / "samples.jsonl", std::ios::binary) {
-        if (!queries_ || !samples_) throw std::runtime_error("Open streaming artifacts failed");
-        std::ofstream writes(directory / "writes.jsonl", std::ios::binary);
-        writes.close();
-        if (!writes) throw std::runtime_error("Create writes.jsonl failed");
+          samples_(directory / "samples.jsonl", std::ios::binary),
+          writes_(directory / "writes.jsonl", std::ios::binary), mixed_(mixed) {
+        if (mixed_) receipts_.open(directory / "receipts.jsonl", std::ios::binary);
+        if (!Good()) throw std::runtime_error("Open streaming artifacts failed");
     }
     bool WriteQuery(std::string_view record) noexcept override {
         queries_.write(record.data(), static_cast<std::streamsize>(record.size()));
@@ -166,16 +167,27 @@ public:
         samples_.write(record.data(), static_cast<std::streamsize>(record.size()));
         return static_cast<bool>(samples_);
     }
+    bool WriteUpdate(std::string_view record, const WriteReceipt* receipt) noexcept override {
+        writes_.write(record.data(), static_cast<std::streamsize>(record.size()));
+        if (receipt) receipts_.write(record.data(), static_cast<std::streamsize>(record.size()));
+        return Good();
+    }
     bool Flush() noexcept override {
         queries_.flush();
         samples_.flush();
-        return static_cast<bool>(queries_) && static_cast<bool>(samples_);
+        writes_.flush();
+        if (mixed_) receipts_.flush();
+        return Good();
     }
     bool Close() {
         queries_.close();
         samples_.close();
-        return static_cast<bool>(queries_) && static_cast<bool>(samples_);
+        writes_.close();
+        if (mixed_) receipts_.close();
+        return Good();
     }
+private:
+    bool Good() const { return queries_ && samples_ && writes_ && (!mixed_ || receipts_); }
 };
 
 void WriteJson(const std::filesystem::path& path, const json::object& object) {
@@ -340,6 +352,20 @@ json::object EngineEnvironment(const Arguments& arguments, const Config& config,
 int RunEngine(const Arguments& arguments, const Config& config, bool& output_created) {
     auto governor = Take(CreateResourceGovernor(config.memory, config.engine.rebuild_memory));
     const auto cli_memory = Take(governor->TryReserve({MemoryRegion::workspace, 4194304}));
+    std::shared_ptr<const BudgetReservation> trace_memory;
+    std::vector<BenchmarkEvent> events;
+    if (config.mixed) {
+        if (std::filesystem::absolute(arguments.config).lexically_normal().parent_path() !=
+            arguments.output)
+            throw ConfigError("The mixed run configuration must be in the output directory");
+        const auto byte_count = std::filesystem::file_size(config.trace);
+        if (byte_count > config.memory.workspace_bytes / 8)
+            throw ConfigError("The fixed trace exceeds the workspace budget");
+        trace_memory = Take(governor->TryReserve({MemoryRegion::workspace, byte_count * 8}));
+        if (FormatDigest(Take(HashFile(config.trace))) != config.trace_sha256)
+            throw ConfigError("Fixed trace SHA256 mismatch");
+        events = ReadTrace(config);
+    }
 
     EngineTargetConfig target_config;
     target_config.index_directory = config.directory;
@@ -347,33 +373,55 @@ int RunEngine(const Arguments& arguments, const Config& config, bool& output_cre
     target_config.ids = config.ids;
     target_config.queries = config.queries;
     target_config.query_ids = config.query_ids;
+    target_config.updates = config.updates;
     target_config.dimension = config.dimension;
     target_config.query_count = config.benchmark.query_count;
     target_config.vectors_sha256 = config.vectors_sha256;
     target_config.ids_sha256 = config.ids_sha256;
     target_config.queries_sha256 = config.queries_sha256;
     target_config.query_ids_sha256 = config.query_ids_sha256;
+    target_config.updates_sha256 = config.updates_sha256;
     target_config.engine = config.engine;
     // Opening the index verifies CURRENT, the manifest, every segment file hash
     // and the input hashes. Doing it before the output directory exists keeps a
     // rejected configuration from leaving an empty run directory behind.
     auto target = Take(EngineBenchmarkTarget::Open(target_config, governor));
+    if (config.mixed) {
+        static_cast<void>(Take(target->ValidateTrace(events)));
+        if (target->ManifestGeneration() != 1 || Take(target->Stats()).published_sequence != 0)
+            throw ConfigError("Mixed runs currently require a fresh index at sequence zero");
+    }
 
     PrepareOutputDirectory(arguments.output);
     output_created = true;
-    Files files(arguments.output);
+    Files files(arguments.output, config.mixed);
     std::ofstream standard_log(arguments.output / "stdout.log", std::ios::binary);
     std::ofstream error_log(arguments.output / "stderr.log", std::ios::binary);
     if (!standard_log || !error_log) throw std::runtime_error("Open process logs failed");
 
     auto effective = config.effective;
+    if (config.mixed) {
+        const auto destination = arguments.output / "trace.jsonl";
+        if (config.trace != destination && !std::filesystem::copy_file(config.trace, destination))
+            throw ConfigError("Cannot retain the fixed trace");
+        if (FormatDigest(Take(HashFile(destination))) != config.trace_sha256)
+            throw ConfigError("Retained trace SHA256 mismatch");
+        effective.at("trace").as_object()["file"] = "trace.jsonl";
+    }
     effective["unbudgeted_metadata_bytes"] =
         json::string(std::to_string(target->UnbudgetedMetadataBytes()));
     WriteJson(arguments.output / "effective-config.json", effective);
     const auto load_ns = target->LoadNanoseconds();
     WriteJson(arguments.output / "environment.json",
               EngineEnvironment(arguments, config, *target, load_ns, nullptr));
-    auto result = RunStaticBenchmark(config.benchmark, *target, files, governor);
+    std::string payload_file;
+    if (config.mixed) {
+        const auto& payload = effective.at("dataset").as_object().at("updates").as_string();
+        payload_file.assign(payload.data(), payload.size());
+    }
+    const BenchmarkTrace trace{events, payload_file, config.updates_sha256, config.dimension};
+    auto result = config.mixed ? RunMixedBenchmark(config.benchmark, trace, *target, files, governor)
+                               : RunStaticBenchmark(config.benchmark, *target, files, governor);
     if (const auto* issue = std::get_if<Error>(&result)) {
         error_log << issue->message << '\n';
         error_log.close();
@@ -416,7 +464,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 2 && std::wstring(argv[1]) == L"--help") {
         std::puts("vector_bench --config run.json --output new-directory "
                   "[--target engine|contract-test] [--job-metrics metrics.json]\n"
-                  "engine is the real static target and requires verified input hashes.\n"
+                  "engine runs real static or fixed-trace mixed requests and verifies input hashes.\n"
                   "contract-test accepts only purpose=contract_example.\n"
                   "Test controls: --test-delay-ms N --test-error-every N (0..60000).");
         return 0;
@@ -433,8 +481,8 @@ int wmain(int argc, wchar_t** argv) {
             output = arguments.output;
             return RunEngine(arguments, config, output_created);
         }
-        if (config.benchmark.purpose != "contract_example") {
-            std::fputs("contract-test refuses purpose=measurement.\n", stderr);
+        if (config.benchmark.purpose != "contract_example" || config.mixed) {
+            std::fputs("contract-test requires a static contract_example.\n", stderr);
             return 3;
         }
         arguments.output = std::filesystem::absolute(arguments.output).lexically_normal();

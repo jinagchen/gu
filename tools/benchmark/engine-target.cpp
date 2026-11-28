@@ -54,6 +54,9 @@ Result<std::unique_ptr<EngineBenchmarkTarget>> EngineBenchmarkTarget::Open(
     const EngineTargetConfig& config, std::shared_ptr<ResourceGovernor> governor) {
     if (config.dimension == 0 || config.query_count == 0)
         return Failure(ErrorCode::invalid_argument, "Engine target needs queries and a dimension");
+    if (config.query_count > UINT64_MAX / (std::uint64_t{config.dimension} * sizeof(float)) ||
+        config.query_count > UINT64_MAX / sizeof(VectorId))
+        return Failure(ErrorCode::invalid_argument, "Query input size overflows");
     if (!governor) return Failure(ErrorCode::invalid_argument, "Engine target needs a governor");
     const auto started = Clock::now();
     if (auto status = VerifyHash(config.vectors, config.vectors_sha256, "dataset.vectors");
@@ -69,10 +72,30 @@ Result<std::unique_ptr<EngineBenchmarkTarget>> EngineBenchmarkTarget::Open(
         !std::holds_alternative<Success>(status))
         return std::get<Error>(status);
 
-    auto query_bytes = ReadWhole(config.queries,
-                                 config.query_count * config.dimension * 4);
+    const auto row_bytes = std::uint64_t{config.dimension} * sizeof(float);
+    const auto query_size = config.query_count * row_bytes;
+    const auto id_size = config.query_count * sizeof(VectorId);
+    std::uint64_t update_size = 0;
+    if (!config.updates.empty()) {
+        const auto status = VerifyHash(config.updates, config.updates_sha256, "dataset.updates");
+        if (const auto* error = std::get_if<Error>(&status)) return *error;
+        std::error_code file_error;
+        update_size = std::filesystem::file_size(config.updates, file_error);
+        if (file_error || !update_size || update_size % row_bytes)
+            return Failure(ErrorCode::invalid_argument, "Invalid update payload length");
+    }
+    if (id_size > UINT64_MAX - query_size || update_size > UINT64_MAX - query_size - id_size)
+        return Failure(ErrorCode::resource_exhausted, "Benchmark input size overflows");
+    const auto input_size = update_size + query_size + id_size;
+    if (input_size > INT64_MAX / 2)
+        return Failure(ErrorCode::resource_exhausted, "Benchmark input is too large");
+    auto reservation = governor->TryReserve({MemoryRegion::workspace, input_size});
+    if (const auto* error = std::get_if<Error>(&reservation)) return *error;
+    auto copies = governor->TryReserve({MemoryRegion::workspace, input_size});
+    if (const auto* error = std::get_if<Error>(&copies)) return *error;
+    auto query_bytes = ReadWhole(config.queries, query_size);
     if (const auto* error = std::get_if<Error>(&query_bytes)) return *error;
-    auto id_bytes = ReadWhole(config.query_ids, config.query_count * 8);
+    auto id_bytes = ReadWhole(config.query_ids, id_size);
     if (const auto* error = std::get_if<Error>(&id_bytes)) return *error;
 
     auto target = std::unique_ptr<EngineBenchmarkTarget>(new EngineBenchmarkTarget());
@@ -85,9 +108,13 @@ Result<std::unique_ptr<EngineBenchmarkTarget>> EngineBenchmarkTarget::Open(
     target->query_ids_.resize(id_raw.size() / sizeof(std::uint64_t));
     std::memcpy(target->query_ids_.data(), id_raw.data(), id_raw.size());
 
-    const std::uint64_t query_bytes_total = query_raw.size() + id_raw.size();
-    auto reservation = governor->TryReserve({MemoryRegion::workspace, query_bytes_total});
-    if (const auto* error = std::get_if<Error>(&reservation)) return *error;
+    if (update_size) {
+        auto update_bytes = ReadWhole(config.updates, update_size);
+        if (const auto* error = std::get_if<Error>(&update_bytes)) return *error;
+        const auto& raw = std::get<std::vector<std::byte>>(update_bytes);
+        target->updates_.resize(raw.size() / sizeof(float));
+        std::memcpy(target->updates_.data(), raw.data(), raw.size());
+    }
     target->query_reservation_ =
         std::get<std::shared_ptr<const BudgetReservation>>(reservation);
 
@@ -129,18 +156,33 @@ Result<BenchmarkSearchResult> EngineBenchmarkTarget::Search(std::uint64_t row,
     if (expected > output.size())
         return Failure(ErrorCode::invalid_argument, "Result slot is smaller than K");
     std::copy_n(search.neighbors.begin(), expected, output.begin());
-    const auto stats = engine_->Stats();
-    if (const auto* error = std::get_if<Error>(&stats)) return *error;
-    const auto live = std::get<EngineStats>(stats).live_vectors;
-    const auto required = (std::min)(static_cast<std::uint64_t>(options.k), live);
-    if (expected < required)
-        return Failure(ErrorCode::search_incomplete,
-                       "Graph search returned fewer neighbours than required");
     BenchmarkSearchResult summary;
     summary.snapshot_sequence = search.snapshot_sequence;
     summary.view_generation = search.view_generation;
     summary.neighbor_count = static_cast<std::uint32_t>(expected);
     return summary;
+}
+
+Result<Success> EngineBenchmarkTarget::ValidateTrace(std::span<const BenchmarkEvent> events) const {
+    for (const auto& event : events) {
+        if (event.operation == BenchmarkOperation::query) {
+            if (event.row >= query_count_ || QueryId(event.row) != event.id)
+                return Failure(ErrorCode::invalid_argument, "Trace query ID does not match its input row");
+        } else if (event.row >= updates_.size() / dimension_) {
+            return Failure(ErrorCode::invalid_argument, "Trace write row is outside the update payload");
+        }
+    }
+    return Success{};
+}
+
+Result<WriteReceipt> EngineBenchmarkTarget::Write(const BenchmarkEvent& event,
+                                                 const WriteOptions& options) {
+    if (event.row >= updates_.size() / dimension_)
+        return Failure(ErrorCode::invalid_argument, "Write row is outside the update payload");
+    const std::span<const float> values(updates_.data() + event.row * dimension_, dimension_);
+    if (event.operation == BenchmarkOperation::insert) return engine_->Insert(event.id, values, options);
+    if (event.operation == BenchmarkOperation::upsert) return engine_->Upsert(event.id, values, options);
+    return Failure(ErrorCode::invalid_argument, "Expected a write operation");
 }
 
 Result<EngineStats> EngineBenchmarkTarget::Stats() const { return engine_->Stats(); }

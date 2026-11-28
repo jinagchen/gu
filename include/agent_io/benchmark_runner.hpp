@@ -29,6 +29,22 @@ struct BenchmarkSearchResult {
     std::uint32_t neighbor_count = 0;
 };
 
+enum class BenchmarkOperation { query, insert, upsert };
+
+struct BenchmarkEvent {
+    BenchmarkOperation operation;
+    std::string operation_id;
+    std::uint64_t row = 0;
+    VectorId id = 0;
+};
+
+struct BenchmarkTrace {
+    std::span<const BenchmarkEvent> events;
+    std::string_view payload_file;
+    std::string_view payload_sha256;
+    std::uint32_t dimension = 0;
+};
+
 // The caller owns the target and all query inputs until RunStaticBenchmark
 // returns. Search is concurrent; it borrows the preallocated output only for
 // the call. Target allocations and input storage require their own budgets.
@@ -39,6 +55,9 @@ public:
     virtual Result<BenchmarkSearchResult> Search(
         std::uint64_t row, const SearchOptions& options,
         std::span<Neighbor> output, std::stop_token stop) = 0;
+    virtual Result<WriteReceipt> Write(const BenchmarkEvent&, const WriteOptions&) {
+        return Error{ErrorCode::unsupported, "Benchmark target does not accept writes"};
+    }
     virtual Result<EngineStats> Stats() const = 0;
     // Quiesce outstanding I/O without closing admission; called after warmup
     // and after measurement, with the same deadline as the client drain.
@@ -52,6 +71,7 @@ class BenchmarkSink {
 public:
     virtual ~BenchmarkSink() = default;
     virtual bool WriteQuery(std::string_view record) noexcept = 0;
+    virtual bool WriteUpdate(std::string_view, const WriteReceipt*) noexcept { return false; }
     virtual bool WriteSample(std::string_view record) noexcept = 0;
     virtual bool Flush() noexcept { return true; }
 };
@@ -72,6 +92,8 @@ struct BenchmarkLatency {
 
 struct BenchmarkReport {
     RequestCounts query;
+    RequestCounts insert;
+    RequestCounts upsert;
     EngineStats start_stats;
     EngineStats end_stats;
     EngineStats counter_delta;
@@ -82,14 +104,19 @@ struct BenchmarkReport {
     std::uint64_t warmup_elapsed_ns = 0;
     RequestCounts warmup_query;
     std::uint64_t query_log_bytes = 0;
+    std::uint64_t write_log_bytes = 0;
     std::uint64_t sample_log_bytes = 0;
     bool run_incomplete = false;
+    bool requires_review = false;
     int exit_code = 0;
     std::string diagnostic;
     // Indexed by RequestStatus: ok, error, rejected.
     std::array<BenchmarkLatency, 3> end_to_end;
     std::array<BenchmarkLatency, 3> queue;
     std::array<BenchmarkLatency, 3> service;
+    std::array<BenchmarkLatency, 2> write_end_to_end;
+    std::array<BenchmarkLatency, 2> write_queue;
+    std::array<BenchmarkLatency, 2> write_service;
     std::array<std::uint64_t, 11> errors_by_code{};
     BenchmarkLatency timeout_end_to_end;
     BenchmarkLatency timeout_queue;
@@ -104,6 +131,10 @@ Result<BenchmarkResourcePlan> PlanStaticBenchmark(const BenchmarkOptions& option
 // timeout; no thread may outlive its target or input buffers.
 Result<BenchmarkReport> RunStaticBenchmark(
     const BenchmarkOptions& options, BenchmarkTarget& target,
+    BenchmarkSink& sink, std::shared_ptr<ResourceGovernor> governor);
+
+Result<BenchmarkReport> RunMixedBenchmark(
+    const BenchmarkOptions& options, const BenchmarkTrace& trace, BenchmarkTarget& target,
     BenchmarkSink& sink, std::shared_ptr<ResourceGovernor> governor);
 
 }  // namespace agent_io

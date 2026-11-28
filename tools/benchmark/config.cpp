@@ -149,6 +149,15 @@ struct UniqueKeys {
     bool on_comment(json::string_view, json::error_code&) { return true; }
 };
 
+json::value ParseJson(std::string_view text) {
+    json::basic_parser<UniqueKeys> parser(json::parse_options{});
+    json::error_code error;
+    const auto consumed = parser.write_some(false, text.data(), text.size(), error);
+    Require(!error && consumed == text.size() && parser.done(),
+            "Invalid JSON, duplicate key, nonfinite number or trailing content");
+    return json::parse(json::string_view(text.data(), text.size()));
+}
+
 json::object Counts(const RequestCounts& counts) {
     return {{"scheduled", std::to_string(counts.scheduled)},
         {"succeeded", std::to_string(counts.succeeded)},
@@ -187,12 +196,7 @@ Config ReadConfig(const std::filesystem::path& path) {
     const auto size = input.gcount();
     Require(size > 0 && size <= 1048576, "Configuration must fit in 1 MiB");
     text.resize(static_cast<std::size_t>(size));
-    json::basic_parser<UniqueKeys> parser(json::parse_options{});
-    json::error_code error;
-    const auto consumed = parser.write_some(false, text.data(), text.size(), error);
-    Require(!error && consumed == text.size() && parser.done(),
-            "Invalid JSON, duplicate key, nonfinite number or trailing content");
-    const auto document = json::parse(text);
+    const auto document = ParseJson(text);
     const auto& root = Object(document, {"schema_version", "protocol_version", "purpose",
         "run_id", "dataset", "engine", "search", "workload", "measurement"},
         {"index", "trace", "answers", "unbudgeted_metadata_bytes"});
@@ -212,8 +216,6 @@ Config ReadConfig(const std::filesystem::path& path) {
     config.vector_count = U64(dataset.at("vector_count"), true);
     options.query_count = U64(dataset.at("query_count"), true);
     config.dimension = U32(dataset.at("dimension"), true);
-    // EVAL-1.1 discloses a hash for every dataset file, including the optional
-    // update payload; the static baseline has no writes and does not consume it.
     const auto& hashes = Object(dataset.at("sha256"), {"vectors", "ids", "queries", "query_ids"},
                                 {"updates"});
     for (auto name : {"vectors", "ids", "queries", "query_ids"}) {
@@ -284,9 +286,13 @@ Config ReadConfig(const std::filesystem::path& path) {
     options.limits.workers = U32(workload.at("workers"), true);
     options.limits.client_queue_capacity = U32(workload.at("client_queue_capacity"), true);
     options.limits.client_queue_bytes = U64(workload.at("client_queue_bytes"), true);
-    Require(Number(workload.at("query_fraction")) == 1 &&
-            Number(workload.at("insert_fraction")) == 0 &&
-            Number(workload.at("upsert_fraction")) == 0, "This runner supports static queries only");
+    const auto query_fraction = Number(workload.at("query_fraction"));
+    const auto insert_fraction = Number(workload.at("insert_fraction"));
+    const auto upsert_fraction = Number(workload.at("upsert_fraction"));
+    Require(query_fraction > 0 && insert_fraction >= 0 && upsert_fraction >= 0 &&
+            std::abs(query_fraction + insert_fraction + upsert_fraction - 1.0) <= 1e-9,
+            "Invalid query, insert or upsert fractions");
+    config.mixed = insert_fraction > 0 || upsert_fraction > 0;
     options.seed = U64(workload.at("seed"));
     const auto& measurement = Object(root.at("measurement"), {"warmup_ms", "duration_ms",
         "drain_timeout_ms", "sample_interval_ms", "result_queue_capacity",
@@ -386,7 +392,79 @@ Config ReadConfig(const std::filesystem::path& path) {
     config.ids = to_path(resolve(dataset.at("ids")));
     config.queries = to_path(resolve(dataset.at("queries")));
     config.query_ids = to_path(resolve(dataset.at("query_ids")));
+    if (config.mixed) {
+        Require(root.contains("index") && root.contains("trace") && root.contains("answers") &&
+                    dataset.contains("updates") && hashes.contains("updates"),
+                "Mixed workloads require index, trace, answers and update payload");
+        const auto& trace = Object(root.at("trace"), {"file", "sha256", "operations",
+            "queries", "seed"}, {"update_distribution", "snapshot_policy"});
+        Checksum(trace.at("sha256"), false);
+        Checksum(hashes.at("updates"), false);
+        config.trace = to_path(resolve(trace.at("file")));
+        config.trace_sha256 = Text(trace.at("sha256"), 64);
+        config.updates = to_path(resolve(dataset.at("updates")));
+        config.updates_sha256 = Text(hashes.at("updates"), 64);
+        static_cast<void>(U64(trace.at("seed")));
+    }
     return config;
+}
+
+std::vector<BenchmarkEvent> ReadTrace(const Config& config) {
+    std::ifstream input(config.trace, std::ios::binary);
+    Require(static_cast<bool>(input), "Cannot open the fixed trace");
+    std::vector<BenchmarkEvent> events;
+    std::set<std::string> ids;
+    std::array<std::uint64_t, 3> counts{};
+    const auto& spec = config.effective.at("trace").as_object();
+    const auto writes = U64(spec.at("operations"), true);
+    const auto queries = U64(spec.at("queries"), true);
+    Require(queries <= UINT32_MAX && writes <= UINT32_MAX - queries,
+            "Trace length exceeds its supported range");
+    const auto total = writes + queries;
+    Require(total <= config.memory.workspace_bytes / 512, "Trace exceeds workspace budget");
+    events.reserve(static_cast<std::size_t>(total));
+    char line[4097];
+    while (input.getline(line, sizeof(line))) {
+        Require(events.size() < total, "Trace contains more events than declared");
+        const auto length = static_cast<std::size_t>(input.gcount()) - (input.eof() ? 0 : 1);
+        const auto document = ParseJson(std::string_view(line, length));
+        const auto& row = Object(document, {"schema_version", "protocol_version", "purpose",
+            "run_id", "arrival_index", "kind", "operation_id"},
+            {"operation", "id", "payload_row", "query_id", "query_row"});
+        Require(U32(row.at("schema_version")) == 1 &&
+                    Text(row.at("protocol_version")) == "EVAL-1.1" &&
+                    Text(row.at("purpose")) == config.benchmark.purpose &&
+                    Text(row.at("run_id")) == config.benchmark.run_id &&
+                    U32(row.at("arrival_index")) == events.size(),
+                "Invalid trace header or arrival order");
+        auto id = Text(row.at("operation_id"), 128);
+        Require(ids.insert(id).second, "Duplicate trace operation ID");
+        const auto kind = Text(row.at("kind"));
+        if (kind == "query") {
+            Require(row.size() == 9 && row.contains("query_id") && row.contains("query_row"),
+                    "Invalid query trace row");
+            const auto position = U64(row.at("query_row"));
+            Require(position < config.benchmark.query_count, "Query trace row is outside dataset");
+            events.push_back({BenchmarkOperation::query, std::move(id), position, U64(row.at("query_id"))});
+        } else {
+            Require(kind == "write" && row.size() == 10 && row.contains("operation") &&
+                        row.contains("id") && row.contains("payload_row"), "Invalid write trace row");
+            const auto operation = Text(row.at("operation"));
+            Require(operation == "insert" || operation == "upsert", "Invalid trace write operation");
+            events.push_back({operation == "insert" ? BenchmarkOperation::insert : BenchmarkOperation::upsert,
+                              std::move(id), U64(row.at("payload_row")), U64(row.at("id"))});
+        }
+        ++counts[static_cast<std::size_t>(events.back().operation)];
+    }
+    Require(input.eof() && events.size() == total && counts[0] == queries,
+            "Trace is truncated, oversized or has incorrect counts");
+    const auto& workload = config.effective.at("workload").as_object();
+    const char* fractions[] = {"query_fraction", "insert_fraction", "upsert_fraction"};
+    for (std::size_t i = 0; i < counts.size(); ++i)
+        Require(std::abs(Number(workload.at(fractions[i])) -
+                        static_cast<double>(counts[i]) / static_cast<double>(total)) <= 1e-9,
+                "Workload fractions disagree with the trace");
+    return events;
 }
 
 boost::json::object Counters(const BenchmarkOptions& options, const BenchmarkReport& report) {
@@ -394,11 +472,11 @@ boost::json::object Counters(const BenchmarkOptions& options, const BenchmarkRep
     output["duration_ns"] = std::to_string(report.duration_ns);
     output["drain_ns"] = std::to_string(report.drain_ns);
     output["run_incomplete"] = report.run_incomplete;
-    output["requires_review"] = false;
+    output["requires_review"] = report.requires_review;
     output["measurement_start_sequence"] = std::to_string(report.start_stats.published_sequence);
     output["measurement_end_sequence"] = std::to_string(report.end_stats.published_sequence);
     output["by_type"] = json::object{{"query", Counts(report.query)},
-        {"insert", Counts({})}, {"upsert", Counts({})}};
+        {"insert", Counts(report.insert)}, {"upsert", Counts(report.upsert)}};
     const auto& delta = report.counter_delta;
     output["engine_counters"] = json::object{
         {"io_reads_submitted", std::to_string(delta.io_reads_submitted)},
@@ -428,6 +506,22 @@ boost::json::object Summary(const BenchmarkOptions& options, const BenchmarkRepo
         latencies[statuses[i]] = json::object{{"end_to_end", Latency(report.end_to_end[i])},
             {"queue", Latency(report.queue[i])}, {"service", Latency(report.service[i])}};
     output["latencies"] = std::move(latencies);
+    if (report.insert.scheduled || report.upsert.scheduled) {
+        json::object writes;
+        const RequestCounts kinds[] = {report.insert, report.upsert};
+        const char* names[] = {"insert", "upsert"};
+        for (std::size_t i = 0; i < std::size(kinds); ++i)
+            writes[names[i]] = json::object{
+                {"window_confirmed_per_second", kinds[i].window_succeeded * 1e9 /
+                                               static_cast<double>(report.duration_ns)},
+                {"drained_confirmed_per_second", kinds[i].succeeded * 1e9 /
+                    static_cast<double>(report.duration_ns + report.drain_ns)},
+                {"end_to_end", Latency(report.write_end_to_end[i])},
+                {"queue", Latency(report.write_queue[i])},
+                {"service", Latency(report.write_service[i])}};
+        output["writes"] = std::move(writes);
+        output["write_log_bytes"] = std::to_string(report.write_log_bytes);
+    }
     output["read_path"] = json::object{
         {"cache_hits", std::to_string(report.counter_delta.cache_hits)},
         {"cache_misses", std::to_string(report.counter_delta.cache_misses)},

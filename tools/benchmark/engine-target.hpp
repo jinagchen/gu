@@ -19,12 +19,14 @@ struct EngineTargetConfig {
     std::filesystem::path ids;
     std::filesystem::path queries;
     std::filesystem::path query_ids;
+    std::filesystem::path updates;
     std::uint32_t dimension = 0;
     std::uint64_t query_count = 0;
     std::string vectors_sha256;
     std::string ids_sha256;
     std::string queries_sha256;
     std::string query_ids_sha256;
+    std::string updates_sha256;
     EngineOptions engine;
 };
 
@@ -38,6 +40,8 @@ public:
     Result<BenchmarkSearchResult> Search(std::uint64_t row, const SearchOptions& options,
                                          std::span<Neighbor> output,
                                          std::stop_token stop) override;
+    Result<WriteReceipt> Write(const BenchmarkEvent& event, const WriteOptions& options) override;
+    Result<Success> ValidateTrace(std::span<const BenchmarkEvent> events) const;
     Result<EngineStats> Stats() const override;
     Result<Success> Drain(std::chrono::steady_clock::time_point deadline) override;
 
@@ -52,6 +56,7 @@ private:
     std::shared_ptr<const BudgetReservation> query_reservation_;
     std::vector<float> queries_;
     std::vector<VectorId> query_ids_;
+    std::vector<float> updates_;
     std::uint32_t dimension_ = 0;
     std::uint64_t query_count_ = 0;
     std::uint64_t load_ns_ = 0;

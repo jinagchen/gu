@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <stdexcept>
+#include <vector>
 
 namespace agent_io::bench_cli {
 
@@ -27,15 +28,21 @@ struct Config {
     std::filesystem::path ids;
     std::filesystem::path queries;
     std::filesystem::path query_ids;
+    std::filesystem::path updates;
+    std::filesystem::path trace;
     std::string vectors_sha256;
     std::string ids_sha256;
     std::string queries_sha256;
     std::string query_ids_sha256;
+    std::string updates_sha256;
+    std::string trace_sha256;
+    bool mixed = false;
     bool complete_evaluation_config = false;
 };
 
 std::string Utf8(const std::filesystem::path& path);
 Config ReadConfig(const std::filesystem::path& path);
+std::vector<BenchmarkEvent> ReadTrace(const Config& config);
 boost::json::object Counters(const BenchmarkOptions& options, const BenchmarkReport& report);
 boost::json::object Summary(const BenchmarkOptions& options, const BenchmarkReport& report);
 

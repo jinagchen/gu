@@ -139,6 +139,7 @@ struct Request {
     std::uint64_t ordinal = 0;
     std::uint64_t row = 0;
     std::uint64_t scheduled_ns = 0;
+    const BenchmarkEvent* event = nullptr;
 };
 
 struct Slot {
@@ -148,16 +149,22 @@ struct Slot {
     RequestStatus status = RequestStatus::ok;
     ErrorCode error_code = ErrorCode::io_error;
     std::size_t length = 0;
+    BenchmarkOperation operation = BenchmarkOperation::query;
+    std::optional<WriteReceipt> receipt;
+    bool uncertain = false;
 };
 
-void QueryLine(Slot& slot, const BenchmarkOptions& options, const Request& request,
-               VectorId query_id, const BenchmarkSearchResult* result,
-               const Error* error) {
-    JsonLine line(slot.record);
+void ResultHeader(JsonLine& line, const Slot& slot, const BenchmarkOptions& options,
+                  const Request& request, const Error* error) {
     Header(line, options);
-    line.Raw(",\"operation_id\":\"q-");
-    line.Number(request.ordinal);
-    line.Raw("\",\"status\":");
+    line.Raw(",\"operation_id\":");
+    if (request.event) line.Text(request.event->operation_id);
+    else {
+        line.Raw("\"q-");
+        line.Number(request.ordinal);
+        line.Raw("\"");
+    }
+    line.Raw(",\"status\":");
     line.Text(slot.status == RequestStatus::ok ? "ok" :
               slot.status == RequestStatus::error ? "error" : "rejected");
     line.Raw(",\"scheduled_ns\":"); line.Decimal(slot.timing.scheduled_ns);
@@ -180,8 +187,19 @@ void QueryLine(Slot& slot, const BenchmarkOptions& options, const Request& reque
         }
         line.Text(message);
         line.Raw(",\"system_error\":"); line.Signed(error->system_error);
-        line.Raw(",\"write_effect\":\"none\",\"attempted_sequence\":null}");
+        line.Raw(",\"write_effect\":");
+        line.Text(error->write_effect == WriteEffect::may_have_applied ? "may_have_applied" : "none");
+        line.Raw(",\"attempted_sequence\":");
+        if (error->attempted_sequence) line.Decimal(*error->attempted_sequence);
+        else line.Raw("null");
+        line.Raw("}");
     }
+}
+
+void QueryLine(Slot& slot, const BenchmarkOptions& options, const Request& request,
+               VectorId query_id, const BenchmarkSearchResult* result, const Error* error) {
+    JsonLine line(slot.record);
+    ResultHeader(line, slot, options, request, error);
     line.Raw(",\"query_id\":"); line.Decimal(query_id);
     line.Raw(",\"snapshot_sequence\":");
     if (result) line.Decimal(result->snapshot_sequence); else line.Raw("null");
@@ -201,6 +219,33 @@ void QueryLine(Slot& slot, const BenchmarkOptions& options, const Request& reque
     }
     line.Raw("]}\n");
     slot.length = line.View().size();
+}
+
+void WriteLine(Slot& slot, const BenchmarkOptions& options, const Request& request,
+               const BenchmarkTrace& trace, const Error* error) {
+    JsonLine line(slot.record);
+    ResultHeader(line, slot, options, request, error);
+    line.Raw(",\"operation\":");
+    line.Text(slot.operation == BenchmarkOperation::insert ? "insert" : "upsert");
+    line.Raw(",\"id\":"); line.Decimal(request.event->id);
+    line.Raw(",\"payload\":{\"file\":"); line.Text(trace.payload_file);
+    line.Raw(",\"row\":"); line.Decimal(request.event->row);
+    line.Raw(",\"dimension\":"); line.Number(trace.dimension);
+    line.Raw(",\"sha256\":"); line.Text(trace.payload_sha256);
+    line.Raw("},\"sequence\":");
+    if (slot.receipt) line.Decimal(slot.receipt->sequence);
+    else line.Raw("null");
+    line.Raw("}\n");
+    slot.length = line.View().size();
+}
+
+RequestCounts& CountsFor(BenchmarkReport& report, BenchmarkOperation operation) {
+    switch (operation) {
+        case BenchmarkOperation::query: return report.query;
+        case BenchmarkOperation::insert: return report.insert;
+        case BenchmarkOperation::upsert: return report.upsert;
+    }
+    throw std::invalid_argument("Unknown benchmark operation");
 }
 
 bool ValidResult(const BenchmarkSearchResult& result, const Slot& slot) {
@@ -257,6 +302,7 @@ class Phase {
     BenchmarkReport& report_;
     const bool measured_;
     const std::uint64_t duration_;
+    const BenchmarkTrace* trace_;
     std::vector<Request> requests_;
     std::vector<Slot> slots_;
     std::vector<std::uint32_t> ready_, free_;
@@ -291,6 +337,31 @@ class Phase {
         changed_.notify_all();
     }
 
+    void ExecuteWrite(Slot& slot, const Request& request) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline_ - Clock::now());
+        const auto timeout = (std::max)(std::chrono::milliseconds(1),
+                                        (std::min)(WriteOptions{}.admission_timeout, remaining));
+        Result<WriteReceipt> result = Error{ErrorCode::io_error, "Target write threw an exception",
+                                           0, WriteEffect::may_have_applied};
+        slot.timing.api_start_ns = Elapsed(origin_);
+        try {
+            result = target_.Write(*request.event, WriteOptions{timeout});
+        } catch (...) {}
+        slot.timing.completed_ns = Elapsed(origin_);
+        if (const auto* receipt = std::get_if<WriteReceipt>(&result)) {
+            if (receipt->id != request.event->id || receipt->sequence == 0)
+                result = Error{ErrorCode::corruption, "Target returned an invalid write receipt",
+                               0, WriteEffect::may_have_applied};
+            else
+                slot.receipt = *receipt;
+        }
+        const auto* error = std::get_if<Error>(&result);
+        slot.status = error ? RequestStatus::error : RequestStatus::ok;
+        slot.uncertain = error && error->write_effect == WriteEffect::may_have_applied;
+        WriteLine(slot, options_, request, *trace_, error);
+    }
+
     void Worker() noexcept {
         try {
             std::unique_lock lock(mutex_);
@@ -309,7 +380,19 @@ class Phase {
                 auto& slot = slots_[index];
                 slot.status = RequestStatus::ok;
                 slot.timing = {request.scheduled_ns, std::nullopt, 0};
+                slot.operation = request.event ? request.event->operation : BenchmarkOperation::query;
+                slot.receipt.reset();
+                slot.uncertain = false;
                 lock.unlock();
+                if (slot.operation != BenchmarkOperation::query) {
+                    ExecuteWrite(slot, request);
+                    lock.lock();
+                    --active_;
+                    if (!frozen_ && Clock::now() <= deadline_) PublishLocked(index);
+                    else free_[free_size_++] = index;
+                    changed_.notify_all();
+                    continue;
+                }
                 Result<BenchmarkSearchResult> result = Error{
                     ErrorCode::io_error, "Target Search threw an exception"};
                 try {
@@ -325,7 +408,7 @@ class Phase {
                     result = Error{ErrorCode::io_error, error.what()};
                 } catch (...) {}
                 if (const auto* success = std::get_if<BenchmarkSearchResult>(&result)) {
-                    if (!ValidResult(*success, slot) || (measured_ &&
+                    if (!ValidResult(*success, slot) || (measured_ && !trace_ &&
                         success->snapshot_sequence != report_.start_stats.published_sequence))
                         result = Error{ErrorCode::corruption, "Invalid target query result"};
                 } else {
@@ -377,13 +460,24 @@ class Phase {
     }
 
     void Count(const Slot& slot) {
-        auto& counts = report_.query;
+        auto& counts = CountsFor(report_, slot.operation);
         if (slot.status == RequestStatus::ok) ++counts.succeeded;
         else if (slot.status == RequestStatus::error) ++counts.failed;
         else ++counts.rejected;
         if (slot.timing.completed_ns < duration_) {
             ++counts.window_completed;
             if (slot.status == RequestStatus::ok) ++counts.window_succeeded;
+        }
+        if (slot.operation != BenchmarkOperation::query) {
+            const auto kind = slot.operation == BenchmarkOperation::insert ? 0u : 1u;
+            Observe(report_.write_end_to_end[kind],
+                    slot.timing.completed_ns - slot.timing.scheduled_ns);
+            if (slot.timing.api_start_ns) {
+                Observe(report_.write_queue[kind], *slot.timing.api_start_ns - slot.timing.scheduled_ns);
+                Observe(report_.write_service[kind], slot.timing.completed_ns - *slot.timing.api_start_ns);
+            }
+            report_.requires_review |= slot.uncertain;
+            return;
         }
         const auto status = static_cast<std::size_t>(slot.status);
         Observe(report_.end_to_end[status],
@@ -436,15 +530,20 @@ class Phase {
                     logger_busy_ = true;
                     const auto& slot = slots_[index];
                     lock.unlock();
-                    const bool ok = !measured_ || sink_.WriteQuery(
-                        {slot.record.data(), slot.length});
+                    const bool query = slot.operation == BenchmarkOperation::query;
+                    const std::string_view record{slot.record.data(), slot.length};
+                    const bool ok = !measured_ || (query ? sink_.WriteQuery(record) :
+                        sink_.WriteUpdate(record, slot.receipt ? &*slot.receipt : nullptr));
                     lock.lock();
                     if (ok) {
                         Count(slot);
-                        if (measured_) report_.query_log_bytes += slot.length;
+                        if (measured_) {
+                            if (query) report_.query_log_bytes += slot.length;
+                            else report_.write_log_bytes += slot.length;
+                        }
                     } else {
                         artifact_error_ = true;
-                        diagnostic_ = "Query log output failed";
+                        diagnostic_ = "Operation log output failed";
                         frozen_ = true;
                     }
                     if (index == 0) rejection_busy_ = false;
@@ -470,9 +569,9 @@ public:
 
     Phase(const BenchmarkOptions& options, BenchmarkTarget& target,
           BenchmarkSink& sink, BenchmarkReport& report, bool measured,
-          std::uint64_t duration)
+          std::uint64_t duration, const BenchmarkTrace* trace = nullptr)
         : options_(options), target_(target), sink_(sink), report_(report),
-          measured_(measured), duration_(duration),
+          measured_(measured), duration_(duration), trace_(trace),
           requests_(report.resources.client_slots),
           slots_(report.resources.result_slots),
           ready_(slots_.size()), free_(slots_.size()), sample_buffer_(4096) {
@@ -502,8 +601,13 @@ public:
         std::unique_lock lock(mutex_);
         origin_ = Clock::now();
         deadline_ = origin_ + Ns(duration_ + PhaseNs(options_.drain_timeout));
-        const auto total = Planned(duration_, options_.target_ops_per_second);
-        report_.query.scheduled = total;
+        const auto total = trace_ ? trace_->events.size() :
+            Planned(duration_, options_.target_ops_per_second);
+        if (trace_) {
+            for (const auto& event : trace_->events) ++CountsFor(report_, event.operation).scheduled;
+        } else {
+            report_.query.scheduled = total;
+        }
         started_ = true;
         changed_.notify_all();
         for (std::uint64_t ordinal = 0; ordinal < total && !frozen_; ++ordinal) {
@@ -514,6 +618,10 @@ public:
             Request request{ordinal,
                 (options_.seed % options_.query_count + ordinal % options_.query_count) %
                     options_.query_count, scheduled};
+            if (trace_) {
+                request.event = &trace_->events[ordinal];
+                request.row = request.event->row;
+            }
             if (request_size_ < requests_.size()) {
                 requests_[(request_head_ + request_size_) % requests_.size()] = request;
                 ++request_size_;
@@ -523,10 +631,15 @@ public:
                 auto& slot = slots_[0];
                 slot.status = RequestStatus::rejected;
                 slot.timing = {scheduled, std::nullopt, Elapsed(origin_)};
+                slot.operation = request.event ? request.event->operation : BenchmarkOperation::query;
+                slot.receipt.reset();
+                slot.uncertain = false;
                 const Error error{ErrorCode::resource_exhausted, "Client queue is full"};
                 try {
-                    QueryLine(slot, options_, request, target_.QueryId(request.row),
-                              nullptr, &error);
+                    if (slot.operation == BenchmarkOperation::query)
+                        QueryLine(slot, options_, request, target_.QueryId(request.row), nullptr, &error);
+                    else
+                        WriteLine(slot, options_, request, *trace_, &error);
                     PublishLocked(0);
                 } catch (...) {
                     artifact_error_ = true;
@@ -558,9 +671,10 @@ public:
         report_.duration_ns = duration_;
         report_.drain_ns = cutoff > duration_ ? cutoff - duration_ : 0;
         report_.cleanup_ns = Elapsed(origin_) > cutoff ? Elapsed(origin_) - cutoff : 0;
-        report_.query.pending = total - report_.query.succeeded -
-                                report_.query.failed - report_.query.rejected;
-        report_.run_incomplete = artifact_error_ || timed_out || report_.query.pending;
+        for (auto* counts : {&report_.query, &report_.insert, &report_.upsert})
+            counts->pending = counts->scheduled - counts->succeeded - counts->failed - counts->rejected;
+        report_.run_incomplete = artifact_error_ || timed_out || report_.query.pending ||
+                                 report_.insert.pending || report_.upsert.pending;
         report_.exit_code = artifact_error_ ? 5 : report_.run_incomplete ? 4 : 0;
         if (*diagnostic_) report_.diagnostic = diagnostic_;
         else if (report_.run_incomplete) report_.diagnostic = "Client drain deadline exceeded";
@@ -621,12 +735,15 @@ Result<BenchmarkResourcePlan> PlanStaticBenchmark(const BenchmarkOptions& option
     }
 }
 
-Result<BenchmarkReport> RunStaticBenchmark(
+static Result<BenchmarkReport> RunBenchmark(
     const BenchmarkOptions& options, BenchmarkTarget& target,
-    BenchmarkSink& sink, std::shared_ptr<ResourceGovernor> governor) {
+    BenchmarkSink& sink, std::shared_ptr<ResourceGovernor> governor, const BenchmarkTrace* trace) {
     auto planned = PlanStaticBenchmark(options);
     if (const auto* error = std::get_if<Error>(&planned)) return *error;
     if (!governor) return Invalid("Missing workspace governor");
+    if (trace && (trace->events.empty() ||
+        trace->events.size() > Planned(PhaseNs(options.duration), options.target_ops_per_second)))
+        return Invalid("The fixed trace does not fit in the measurement window");
     auto reserved = governor->TryReserve(
         {MemoryRegion::workspace, std::get<BenchmarkResourcePlan>(planned).workspace_bytes});
     if (const auto* error = std::get_if<Error>(&reserved)) return *error;
@@ -656,7 +773,7 @@ Result<BenchmarkReport> RunStaticBenchmark(
         if (const auto* error = std::get_if<Error>(&before)) return *error;
         report.start_stats = std::get<EngineStats>(before);
         {
-            Phase phase(options, target, sink, report, true, PhaseNs(options.duration));
+            Phase phase(options, target, sink, report, true, PhaseNs(options.duration), trace);
             phase.Run();
             const auto drain_start = Clock::now();
             const auto drained = target.Drain(phase.Deadline());
@@ -680,16 +797,36 @@ Result<BenchmarkReport> RunStaticBenchmark(
         if (const auto* error = std::get_if<Error>(&after)) return *error;
         report.end_stats = std::get<EngineStats>(after);
         report.counter_delta = Difference(report.start_stats, report.end_stats);
-        if (report.start_stats.published_sequence != report.end_stats.published_sequence ||
+        if (!trace && (report.start_stats.published_sequence != report.end_stats.published_sequence ||
             report.counter_delta.wal_bytes_written || report.counter_delta.merge_bytes_written ||
-            report.counter_delta.checkpoint_bytes_written)
+            report.counter_delta.checkpoint_bytes_written))
             return Invalid("Static benchmark target changed published sequence or wrote data");
+        if (trace && !report.run_incomplete && !report.requires_review &&
+            (report.end_stats.published_sequence < report.start_stats.published_sequence ||
+             report.end_stats.published_sequence - report.start_stats.published_sequence !=
+                 report.insert.succeeded + report.upsert.succeeded)) {
+            report.requires_review = true;
+            report.diagnostic = "Published sequence changed outside the acknowledged writes";
+        }
+        if (report.requires_review && !report.exit_code) report.exit_code = 4;
         return report;
     } catch (const std::bad_alloc&) {
         return Error{ErrorCode::resource_exhausted, "Benchmark allocation failed"};
     } catch (const std::exception& error) {
         return Error{ErrorCode::io_error, error.what()};
     }
+}
+
+Result<BenchmarkReport> RunStaticBenchmark(
+    const BenchmarkOptions& options, BenchmarkTarget& target,
+    BenchmarkSink& sink, std::shared_ptr<ResourceGovernor> governor) {
+    return RunBenchmark(options, target, sink, std::move(governor), nullptr);
+}
+
+Result<BenchmarkReport> RunMixedBenchmark(
+    const BenchmarkOptions& options, const BenchmarkTrace& trace, BenchmarkTarget& target,
+    BenchmarkSink& sink, std::shared_ptr<ResourceGovernor> governor) {
+    return RunBenchmark(options, target, sink, std::move(governor), &trace);
 }
 
 }  // namespace agent_io
