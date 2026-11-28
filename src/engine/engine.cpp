@@ -4,6 +4,7 @@
 
 #include "../index/delta.hpp"
 #include "../index/digest.hpp"
+#include "../index/graph.hpp"
 #include "../index/publish.hpp"
 #include "../index/reader.hpp"
 #include "../index/recovery.hpp"
@@ -32,6 +33,40 @@ Error Failure(ErrorCode code, std::string message) {
 
 class StaticLifetime final : public ReadViewLifetime {};
 
+class ViewMutex {
+public:
+    using Deadline = std::chrono::steady_clock::time_point;
+
+    void lock() {
+        const std::lock_guard gate(admission_);
+        view_.lock();
+    }
+
+    void lock_shared() {
+        const std::lock_guard gate(admission_);
+        view_.lock_shared();
+    }
+
+    bool try_lock_until(Deadline deadline) {
+        const std::unique_lock gate(admission_, deadline);
+        return gate.owns_lock() && view_.try_lock_until(deadline);
+    }
+
+    bool try_lock_shared_until(Deadline deadline) {
+        const std::unique_lock gate(admission_, deadline);
+        return gate.owns_lock() && view_.try_lock_shared_until(deadline);
+    }
+
+    void unlock() { view_.unlock(); }
+    void unlock_shared() { view_.unlock_shared(); }
+
+private:
+    // An exclusive waiter holding the gate lets existing readers drain
+    // without admitting another reader ahead of it.
+    std::timed_mutex admission_;
+    std::shared_timed_mutex view_;
+};
+
 struct QuerySlot {
     std::atomic<std::uint32_t>* count = nullptr;
     ~QuerySlot() { if (count) --*count; }
@@ -59,6 +94,55 @@ bool AllFinite(std::span<const float> values) {
     return true;
 }
 
+std::optional<InstanceId> GeneratedUuid(std::wstring_view name) {
+    std::array<char, 36> ascii{};
+    if (name.size() != ascii.size()) return std::nullopt;
+    for (std::size_t index = 0; index < ascii.size(); ++index) {
+        if (name[index] > 127) return std::nullopt;
+        ascii[index] = static_cast<char>(name[index]);
+    }
+    auto parsed = ParseUuid(std::string_view(ascii.data(), ascii.size()));
+    if (const auto* uuid = std::get_if<InstanceId>(&parsed)) return *uuid;
+    return std::nullopt;
+}
+
+Result<bool> RemoveSegmentDirectory(const std::filesystem::path& path) {
+    constexpr DWORD non_regular = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const auto error = static_cast<int>(GetLastError());
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return true;
+        return Error{ErrorCode::io_error, "Cannot inspect a retired segment", error};
+    }
+    if ((attributes & non_regular) != FILE_ATTRIBUTE_DIRECTORY) return false;
+
+    constexpr std::array files{L"graph.bin", L"versions.bin", L"segment.json"};
+    std::error_code error;
+    std::filesystem::directory_iterator entry(path, error), end;
+    for (; !error && entry != end; entry.increment(error)) {
+        const auto name = entry->path().filename().native();
+        if (std::find(files.begin(), files.end(), name) == files.end()) return false;
+        const auto child = GetFileAttributesW(entry->path().c_str());
+        if (child == INVALID_FILE_ATTRIBUTES)
+            return Error{ErrorCode::io_error, "Cannot inspect a retired segment file",
+                         static_cast<int>(GetLastError())};
+        if (child & non_regular) return false;
+    }
+    if (error)
+        return Error{ErrorCode::io_error, "Cannot list a retired segment", error.value()};
+
+    // Delete only the known files so unknown contents and junctions survive.
+    for (const auto* name : files) {
+        std::filesystem::remove(path / name, error);
+        if (error)
+            return Error{ErrorCode::io_error, "Cannot delete a retired segment file", error.value()};
+    }
+    std::filesystem::remove(path, error);
+    if (error)
+        return Error{ErrorCode::io_error, "Cannot delete a retired segment directory", error.value()};
+    return true;
+}
+
 }  // namespace
 
 struct Engine::Impl {
@@ -78,7 +162,7 @@ struct Engine::Impl {
     std::uint64_t manifest_generation = 0;
     std::uint64_t live_count = 0;
     std::atomic<std::uint32_t> active_queries{0};
-    mutable std::shared_mutex mutex;
+    mutable ViewMutex mutex;
     bool closed = false;
 
     // --- stage 6: durable writes ---------------------------------------
@@ -90,6 +174,8 @@ struct Engine::Impl {
     // the same order without a second protocol.
     std::mutex publication_mutex;
     Sequence published_sequence = 0;
+    std::mutex write_admission_mutex;
+    std::condition_variable write_admission_cv;
     std::atomic<std::uint32_t> pending_writes{0};
     std::uint64_t wal_file_bytes = 0;
     std::uint64_t wal_bytes_written = 0;
@@ -124,8 +210,13 @@ struct Engine::Impl {
     std::uint64_t compactions_completed = 0;
     std::uint64_t wal_files_reclaimed = 0;
     std::uint64_t segments_reclaimed = 0;
+    mutable std::mutex maintenance_stats_mutex;
     std::uint64_t maintenance_errors = 0;
     std::string last_maintenance_error;
+    std::atomic<std::uint64_t> small_merges_skipped{0};
+    std::atomic<std::uint64_t> maintenance_peak{0};
+    std::atomic<std::uint64_t> recycle_pending{0};
+    bool reclamation_scan_complete = true;
     // Superseded segment directories. A generation is published before its
     // predecessor is dropped, so a deletion failure only costs disk, never
     // correctness; the queue is retried on every maintenance tick.
@@ -137,7 +228,11 @@ struct Engine::Impl {
     }
 
     void RequestStop() {
-        stopping.store(true);
+        {
+            std::scoped_lock guard(write_admission_mutex, maintenance_wait_mutex);
+            stopping.store(true);
+        }
+        write_admission_cv.notify_all();
         maintenance_cv.notify_all();
     }
 
@@ -225,19 +320,33 @@ struct Engine::Impl {
     bool MaintenanceEnabled() const noexcept {
         return options.rebuild_memory.has_value() && options.resources.max_disk_segments > 0;
     }
+    bool CheckpointNeedsMerge(std::uint32_t active_segments) const {
+        const auto on_disk = active_segments + recycle_pending.load();
+        return active_segments >= kMaxManifestSegments ||
+               on_disk + 2 > options.resources.max_disk_segments;
+    }
     // Flushes the published delta prefix into a new segment and switches the
     // generation. Safe to call concurrently with readers; writers wait.
     Result<CheckpointReceipt> RunCheckpoint(std::chrono::milliseconds timeout);
     // Rewrites every segment into one. Only runs when the segment count is over
     // the declared budget, and only through the same publish path.
     Result<Success> RunCompaction(std::chrono::milliseconds timeout);
+    Result<CheckpointReceipt> RunCheckpointLocked();
     Result<Success> RotateWalAfter(Sequence sequence);
     Result<Success> AdoptPublished(OpenedIndex&& opened);
+    Result<Success> PublishAndAdopt(const Manifest& next,
+                                  const std::filesystem::path& staged_segment);
     // Reads every row of every segment, keeping the newest version per ID.
-    Result<std::vector<SegmentRecord>> ReadAllRows(Sequence snapshot,
-                                                   std::uint64_t byte_budget);
+    Result<std::vector<SegmentRecord>> ReadAllRows(
+        VectorAccess& source, const ReadView& source_view, Sequence snapshot,
+        std::uint64_t byte_budget, std::chrono::steady_clock::time_point deadline);
     void RecycleWalUpTo(Sequence target);
+    void RecordMaintenanceFailure(const Error& error);
     void RecycleDue(std::size_t limit);
+    void QueueRecycle(const std::filesystem::path& path);
+    void DiscardStaging(const std::filesystem::path& path);
+    void ReclaimAfterOpen();
+    Result<std::shared_ptr<const BudgetReservation>> ReserveMaintenance(std::uint64_t rows);
     void MaintenanceLoop();
 };
 
@@ -271,16 +380,20 @@ Result<Success> Engine::Impl::RotateWalAfter(Sequence sequence) {
     return Success{};
 }
 
-Result<std::vector<SegmentRecord>> Engine::Impl::ReadAllRows(Sequence snapshot,
-                                                             std::uint64_t byte_budget) {
+Result<std::vector<SegmentRecord>> Engine::Impl::ReadAllRows(
+    VectorAccess& source, const ReadView& source_view, Sequence snapshot,
+    std::uint64_t byte_budget, std::chrono::steady_clock::time_point deadline) {
     std::vector<SegmentRecord> rows;
     std::unordered_map<VectorId, std::size_t> position;
     std::uint64_t bytes = 0;
-    for (std::uint32_t segment_index = 0; segment_index < view.segment_count; ++segment_index) {
-        const auto segment = view.segments[segment_index].id;
-        const auto nodes = view.segments[segment_index].node_count;
+    for (std::uint32_t segment_index = 0; segment_index < source_view.segment_count;
+         ++segment_index) {
+        const auto segment = source_view.segments[segment_index].id;
+        const auto nodes = source_view.segments[segment_index].node_count;
         for (std::uint64_t node = 0; node < nodes; ++node) {
-            auto stored = access->ReadVector(segment, static_cast<NativeNodeId>(node), snapshot);
+            if (stopping.load()) return Failure(ErrorCode::closed, "Compaction is stopping");
+            auto stored = source.ReadVector(segment, static_cast<NativeNodeId>(node), snapshot,
+                                           BlockReadOptions{ReadPriority::background, deadline});
             if (const auto* error = std::get_if<Error>(&stored)) {
                 if (error->code == ErrorCode::not_found) continue;
                 return *error;
@@ -312,10 +425,11 @@ Result<std::vector<SegmentRecord>> Engine::Impl::ReadAllRows(Sequence snapshot,
 Result<Success> Engine::Impl::AdoptPublished(OpenedIndex&& opened) {
     if (opened.manifest.segment_count > kMaxSegmentRefs)
         return Failure(ErrorCode::corruption, "Published manifest exceeds the view capacity");
-    adapter = std::move(opened.adapter);
-    access = dynamic_cast<VectorAccess*>(adapter.get());
-    if (access == nullptr)
+    auto* next_access = dynamic_cast<VectorAccess*>(opened.adapter.get());
+    if (next_access == nullptr)
         return Failure(ErrorCode::unsupported, "Adapter does not expose point reads");
+    adapter = std::move(opened.adapter);
+    access = next_access;
     manifest = opened.manifest;
     manifest_generation = manifest.generation;
     unbudgeted_metadata_bytes = opened.unbudgeted_metadata_bytes;
@@ -342,41 +456,185 @@ Result<Success> Engine::Impl::AdoptPublished(OpenedIndex&& opened) {
     return Success{};
 }
 
+Result<Success> Engine::Impl::PublishAndAdopt(const Manifest& next,
+                                            const std::filesystem::path& staged_segment) {
+    const auto stop_for_recovery = [this, &next](const Error& error) {
+        recovery_required = true;
+        recovery_message = "Cannot adopt generation " + std::to_string(next.generation) +
+                           ": " + error.message;
+        return Error{ErrorCode::recovery_required, recovery_message, error.system_error};
+    };
+    const auto published = PublishManifest(directory, next);
+    if (const auto* error = std::get_if<Error>(&published)) {
+        if (error->code == ErrorCode::recovery_required) return stop_for_recovery(*error);
+        QueueRecycle(staged_segment);
+        return *error;
+    }
+    auto opened = OpenIndexDirectory(directory, reader, registry, options.block_bytes,
+                                     options.max_inflight_reads);
+    if (const auto* error = std::get_if<Error>(&opened)) return stop_for_recovery(*error);
+    const auto adopted = AdoptPublished(std::get<OpenedIndex>(std::move(opened)));
+    if (const auto* error = std::get_if<Error>(&adopted)) return stop_for_recovery(*error);
+    return Success{};
+}
+
 void Engine::Impl::RecycleWalUpTo(Sequence target) {
     std::uint64_t failed = 0;
     auto removed = RecycleWalFiles(wal_directory, manifest.instance_id, target, &failed);
     if (const auto* error = std::get_if<Error>(&removed)) {
-        last_maintenance_error = error->message;
-        ++maintenance_errors;
+        RecordMaintenanceFailure(*error);
         return;
     }
     wal_files_reclaimed += std::get<std::uint64_t>(removed);
 }
 
-void Engine::Impl::RecycleDue(std::size_t limit) {
-    std::size_t done = 0;
-    for (auto item = recycle_queue.begin();
-         item != recycle_queue.end() && done < limit;) {
+void Engine::Impl::RecordMaintenanceFailure(const Error& error) {
+    std::lock_guard stats(maintenance_stats_mutex);
+    ++maintenance_errors;
+    last_maintenance_error = error.message;
+}
+
+void Engine::Impl::QueueRecycle(const std::filesystem::path& path) {
+    recycle_queue.push_back(path);
+    recycle_pending.store(recycle_queue.size());
+}
+
+void Engine::Impl::DiscardStaging(const std::filesystem::path& path) {
+    if (std::holds_alternative<Error>(RemoveSegmentDirectory(path))) QueueRecycle(path);
+}
+
+void Engine::Impl::ReclaimAfterOpen() {
+    constexpr std::size_t scan_limit = 4096;
+    const auto collect = [this](const std::filesystem::path& parent, bool staged) {
+        const auto attributes = GetFileAttributesW(parent.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const auto error = static_cast<int>(GetLastError());
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+                reclamation_scan_complete = false;
+                RecordMaintenanceFailure(
+                    {ErrorCode::io_error, "Cannot inspect the reclamation directory", error});
+            }
+            return;
+        }
+        if ((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) !=
+            FILE_ATTRIBUTE_DIRECTORY) {
+            reclamation_scan_complete = false;
+            RecordMaintenanceFailure(
+                Failure(ErrorCode::io_error, "The reclamation directory is not a regular directory"));
+            return;
+        }
+
         std::error_code error;
-        std::filesystem::remove_all(*item, error);
+        std::size_t scanned = 0;
+        std::filesystem::directory_iterator entry(parent, error), end;
+        for (; !error && entry != end && scanned < scan_limit; entry.increment(error), ++scanned) {
+            const auto path = entry->path();
+            const auto filename = path.filename().native();
+            std::wstring_view uuid_text(filename);
+            if (staged) {
+                if (uuid_text.starts_with(L"checkpoint-"))
+                    uuid_text.remove_prefix(std::wstring_view(L"checkpoint-").size());
+                else if (uuid_text.starts_with(L"merge-"))
+                    uuid_text.remove_prefix(std::wstring_view(L"merge-").size());
+                else
+                    continue;
+            }
+            const auto id = GeneratedUuid(uuid_text);
+            if (!id) continue;
+            if (!staged &&
+                std::any_of(manifest.segments.begin(),
+                            manifest.segments.begin() + manifest.segment_count,
+                            [&id](const ManifestEntry& segment) { return segment.uuid == *id; }))
+                continue;
+            QueueRecycle(path);
+        }
         if (error) {
-            // A reader may still hold a handle. Keeping the directory costs
-            // disk and nothing else, so retry on the next tick instead of
-            // forcing the issue.
+            reclamation_scan_complete = false;
+            RecordMaintenanceFailure(
+                {ErrorCode::io_error, "Cannot list the reclamation directory", error.value()});
+        } else if (entry != end) {
+            reclamation_scan_complete = false;
+            RecordMaintenanceFailure(
+                Failure(ErrorCode::resource_exhausted, "Reclamation directory scan reached its limit"));
+        }
+    };
+    // The validated CURRENT is the only live generation when the instance
+    // lock is held during Open. Earlier or abandoned segments have no leases.
+    collect(directory / "segments", false);
+    collect(directory, true);
+    RecycleDue(recycle_queue.size());
+}
+
+Result<std::shared_ptr<const BudgetReservation>> Engine::Impl::ReserveMaintenance(
+    std::uint64_t rows) {
+    if (!reclamation_scan_complete)
+        return Failure(ErrorCode::resource_exhausted,
+                       "Maintenance requires a complete segment directory scan");
+    const auto per_row = std::uint64_t{manifest.layout.row_bytes} +
+        2 * std::uint64_t{manifest.dimension} * sizeof(float) +
+        5 * std::uint64_t{manifest.layout.max_degree} * sizeof(GraphEdge) + 512;
+    constexpr auto fixed_bytes = std::uint64_t{2} << 20;
+    auto limit = options.memory.workspace_bytes;
+    if (options.rebuild_memory) {
+        limit = (std::min)(limit, options.rebuild_memory->workspace_bytes);
+        limit = (std::min)(limit, options.resources.background_workspace_bytes);
+    }
+    if (limit < fixed_bytes || rows > (limit - fixed_bytes) / per_row)
+        return Failure(ErrorCode::resource_exhausted,
+                       "Maintenance output exceeds the configured workspace budget");
+    const auto estimate = fixed_bytes + rows * per_row;
+    const auto disk_per_row = std::uint64_t{manifest.layout.row_bytes} + kVersionRecordBytes;
+    const auto disk_bytes = fixed_bytes + rows * disk_per_row;
+    std::error_code disk_error;
+    const auto disk = std::filesystem::space(directory, disk_error);
+    if (disk_error)
+        return Error{ErrorCode::io_error, "Cannot measure free space before maintenance",
+                     disk_error.value()};
+    if (disk.available < options.resources.min_free_disk_bytes ||
+        disk_bytes > disk.available - options.resources.min_free_disk_bytes)
+        return Failure(ErrorCode::resource_exhausted,
+                       "Maintenance would exceed the available staging disk budget");
+    auto reservation = governor->TryReserve({MemoryRegion::workspace, estimate});
+    if (std::holds_alternative<std::shared_ptr<const BudgetReservation>>(reservation))
+        maintenance_peak.store((std::max)(maintenance_peak.load(), estimate));
+    return reservation;
+}
+
+void Engine::Impl::RecycleDue(std::size_t limit) {
+    static_cast<void>(registry->CollectRetired());
+    std::size_t attempted = 0;
+    auto item = recycle_queue.begin();
+    while (item != recycle_queue.end() && attempted < limit) {
+        ++attempted;
+        const auto removed = RemoveSegmentDirectory(*item);
+        if (std::holds_alternative<Error>(removed)) {
+            // A reader may still hold a handle. Retry on the next tick.
             ++item;
             continue;
         }
         item = recycle_queue.erase(item);
-        ++done;
-        ++segments_reclaimed;
+        recycle_pending.store(recycle_queue.size());
+        if (std::get<bool>(removed)) ++segments_reclaimed;
     }
+    // Rotate attempted failures behind untouched entries so blocked cleanup
+    // does not starve later directories.
+    if (item != recycle_queue.end())
+        std::rotate(recycle_queue.begin(), item, recycle_queue.end());
 }
 
 Result<CheckpointReceipt> Engine::Impl::RunCheckpoint(std::chrono::milliseconds timeout) {
     if (timeout.count() <= 0)
         return Failure(ErrorCode::invalid_argument, "Checkpoint timeout must be positive");
     std::lock_guard<std::mutex> maintenance_guard(maintenance_mutex);
+    if (stopping.load()) return Failure(ErrorCode::closed, "Engine is closing");
+    RecycleDue(4);
+    auto result = RunCheckpointLocked();
+    if (const auto* error = std::get_if<Error>(&result)) RecordMaintenanceFailure(*error);
+    RecycleDue(4);
+    return result;
+}
 
+Result<CheckpointReceipt> Engine::Impl::RunCheckpointLocked() {
     std::vector<SegmentRecord> records;
     Sequence target = 0;
     std::uint32_t frozen = 0;
@@ -386,8 +644,9 @@ Result<CheckpointReceipt> Engine::Impl::RunCheckpoint(std::chrono::milliseconds 
     NodeRecordLayout layout;
     std::string builder_name;
     std::string builder_parameters;
+    std::shared_ptr<const BudgetReservation> workspace;
     {
-        std::unique_lock<std::shared_mutex> guard(mutex);
+        std::unique_lock guard(mutex);
         if (closed) return Failure(ErrorCode::closed, "Engine is closed");
         if (recovery_required) return Error{ErrorCode::recovery_required, recovery_message};
         if (!delta)
@@ -403,6 +662,15 @@ Result<CheckpointReceipt> Engine::Impl::RunCheckpoint(std::chrono::milliseconds 
             receipt.manifest_generation = manifest.generation;
             return receipt;
         }
+        if (manifest.segment_count >= kMaxManifestSegments)
+            return Failure(ErrorCode::resource_exhausted,
+                           "The manifest segment budget is full; compaction is required");
+        if (CheckpointNeedsMerge(manifest.segment_count))
+            return Failure(ErrorCode::resource_exhausted,
+                           "The disk segment budget needs a slot reserved for compaction");
+        auto reserved = ReserveMaintenance(frozen);
+        if (const auto* error = std::get_if<Error>(&reserved)) return *error;
+        workspace = std::get<std::shared_ptr<const BudgetReservation>>(std::move(reserved));
         dimension = manifest.dimension;
         block_bytes = manifest.block_bytes;
         layout = manifest.layout;
@@ -450,8 +718,7 @@ Result<CheckpointReceipt> Engine::Impl::RunCheckpoint(std::chrono::milliseconds 
     request.parameters = builder_parameters;
     auto written = WriteSegment(request);
     if (const auto* error = std::get_if<Error>(&written)) {
-        std::error_code ignored;
-        std::filesystem::remove_all(staging, ignored);
+        DiscardStaging(staging);
         return *error;
     }
     const auto artifact = std::get<SegmentArtifact>(std::move(written));
@@ -460,33 +727,33 @@ Result<CheckpointReceipt> Engine::Impl::RunCheckpoint(std::chrono::milliseconds 
     const auto segments_directory = directory / "segments";
     std::filesystem::create_directories(segments_directory, path_error);
     if (path_error) {
-        std::error_code ignored;
-        std::filesystem::remove_all(staging, ignored);
-        ++maintenance_errors;
+        DiscardStaging(staging);
         return Failure(ErrorCode::io_error, "Cannot create the segments directory");
     }
     const auto segment_directory = segments_directory / FormatUuid(artifact.uuid);
-    if (!MoveFileExW(staging.c_str(), segment_directory.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        std::error_code ignored;
-        std::filesystem::remove_all(staging, ignored);
-        ++maintenance_errors;
-        return Error{ErrorCode::io_error, "Cannot move the segment into place",
-                       static_cast<int>(GetLastError())};
+    if (!SegmentRename()(staging.c_str(), segment_directory.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        const auto code = static_cast<int>(GetLastError());
+        DiscardStaging(staging);
+        return Error{ErrorCode::io_error, "Cannot move the segment into place", code};
     }
 
-    std::unique_lock<std::shared_mutex> guard(mutex);
+    std::unique_lock guard(mutex);
     std::lock_guard<std::mutex> publication(publication_mutex);
     if (closed) {
-        recycle_queue.push_back(segment_directory);
+        QueueRecycle(segment_directory);
         return Failure(ErrorCode::closed, "Engine closed while the checkpoint was staged");
     }
-    if (manifest.segment_count >= kMaxManifestSegments) {
-        recycle_queue.push_back(segment_directory);
-        return Failure(ErrorCode::resource_exhausted,
-                       "The manifest segment budget is full; compaction is required");
+    if (recovery_required) {
+        QueueRecycle(segment_directory);
+        return Error{ErrorCode::recovery_required, recovery_message};
     }
     Manifest next = manifest;
-    next.generation = manifest.generation + 1;
+    const auto generation = NextManifestGeneration(directory, manifest.generation);
+    if (const auto* error = std::get_if<Error>(&generation)) {
+        QueueRecycle(segment_directory);
+        return *error;
+    }
+    next.generation = std::get<Generation>(generation);
     next.checkpoint_sequence = target;
     next.wal_replay_after = target;
     // live_count counts what segments store. Writes that arrived while this
@@ -510,7 +777,7 @@ Result<CheckpointReceipt> Engine::Impl::RunCheckpoint(std::chrono::milliseconds 
     const auto metadata_text = SetManifestText(
         entry.metadata.path, "segments/" + FormatUuid(artifact.uuid) + "/segment.json");
     if (const auto* error = std::get_if<Error>(&metadata_text)) {
-        recycle_queue.push_back(segment_directory);
+        QueueRecycle(segment_directory);
         return *error;
     }
     entry.metadata.logical_bytes = artifact.metadata_bytes;
@@ -518,26 +785,7 @@ Result<CheckpointReceipt> Engine::Impl::RunCheckpoint(std::chrono::milliseconds 
     entry.metadata.sha256 = artifact.metadata_sha256;
     next.segment_count = manifest.segment_count + 1;
 
-    const auto published = PublishManifest(directory, next);
-    if (const auto* error = std::get_if<Error>(&published)) {
-        recycle_queue.push_back(segment_directory);
-        ++maintenance_errors;
-        return *error;
-    }
-    auto opened = OpenIndexDirectory(directory, reader, registry, options.block_bytes,
-                                     options.max_inflight_reads);
-    if (const auto* error = std::get_if<Error>(&opened)) {
-        // CURRENT already names the new generation. Serving the old adapter
-        // would hand out a view that disagrees with the disk, so stop writing
-        // and let a restart pick up the published state.
-        recovery_required = true;
-        recovery_message = "Published generation " + std::to_string(next.generation) +
-                           " but could not reopen it: " + error->message;
-        ++maintenance_errors;
-        last_maintenance_error = recovery_message;
-        return Error{ErrorCode::recovery_required, recovery_message};
-    }
-    const auto adopted = AdoptPublished(std::get<OpenedIndex>(std::move(opened)));
+    const auto adopted = PublishAndAdopt(next, segment_directory);
     if (const auto* error = std::get_if<Error>(&adopted)) return *error;
     static_cast<void>(delta->RetirePrefix(frozen));
     pending_new_ids -= pending_new_ids > captured_new ? captured_new : pending_new_ids;
@@ -558,74 +806,73 @@ Result<Success> Engine::Impl::RunCompaction(std::chrono::milliseconds timeout) {
     if (timeout.count() <= 0)
         return Failure(ErrorCode::invalid_argument, "Compaction timeout must be positive");
 
-    // A merge rewrites segments only, so anything still in the delta is flushed
-    // first. Claiming a checkpoint sequence for a record no segment holds would
-    // let the next restart skip it -- the one way a merge could lose a write.
+    std::lock_guard<std::mutex> maintenance_guard(maintenance_mutex);
+    RecycleDue(4);
     bool pending = false;
+    bool full = false;
     {
-        std::shared_lock<std::shared_mutex> guard(mutex);
+        std::shared_lock guard(mutex);
         if (closed) return Failure(ErrorCode::closed, "Engine is closed");
         if (recovery_required) return Error{ErrorCode::recovery_required, recovery_message};
         pending = delta && delta->CommittedCount() > 0;
+        full = CheckpointNeedsMerge(manifest.segment_count);
     }
-    if (pending) {
-        const auto flushed = RunCheckpoint(timeout);
+    if (pending && !full) {
+        const auto flushed = RunCheckpointLocked();
         if (const auto* error = std::get_if<Error>(&flushed)) return *error;
     }
 
-    std::lock_guard<std::mutex> maintenance_guard(maintenance_mutex);
     Sequence materialized = 0;
-    Sequence published_at_copy = 0;
-    std::uint32_t retire_count = 0;
     std::uint32_t dimension = 0;
     std::uint32_t block_bytes = 0;
     NodeRecordLayout layout;
     std::string builder_name;
     std::string builder_parameters;
-    std::vector<SegmentRecord> rows;
+    ReadView source_view;
+    VectorAccess* source = nullptr;
+    std::uint64_t budget = 0;
+    std::shared_ptr<const BudgetReservation> workspace;
     std::vector<std::filesystem::path> superseded;
     std::vector<FileId> superseded_files;
     {
-        std::unique_lock<std::shared_mutex> guard(mutex);
+        std::shared_lock guard(mutex);
         if (closed) return Failure(ErrorCode::closed, "Engine is closed");
         if (recovery_required) return Error{ErrorCode::recovery_required, recovery_message};
         if (manifest.segment_count < 2) return Success{};
+        const auto retiring = recycle_pending.load();
+        const auto on_disk = manifest.segment_count + retiring;
+        // Existing indexes can already have every FORMAT-1 slot occupied.
+        // Allow one merge output to repair that state when no retired segment remains.
+        const bool legacy_full = manifest.segment_count == kMaxManifestSegments &&
+            options.resources.max_disk_segments == kMaxManifestSegments && retiring == 0;
+        if (on_disk >= options.resources.max_disk_segments && !legacy_full)
+            return Failure(ErrorCode::resource_exhausted, "The disk segment budget is exhausted");
         // A merge rewrites everything it reads, so a set of nearly empty
         // segments is not worth the I/O yet; the next tick tries again.
-        if (options.merge_min_bytes != 0) {
+        if (!CheckpointNeedsMerge(manifest.segment_count) && options.merge_min_bytes != 0) {
             std::uint64_t live_bytes = 0;
             for (std::uint32_t index = 0; index < manifest.segment_count; ++index)
                 live_bytes += manifest.segments[index].file_bytes;
-            if (live_bytes < options.merge_min_bytes) return Success{};
+            if (live_bytes < options.merge_min_bytes) {
+                ++small_merges_skipped;
+                return Success{};
+            }
         }
-        published_at_copy = published_sequence;
+        std::uint64_t scanned_rows = 0;
+        for (std::uint32_t index = 0; index < manifest.segment_count; ++index)
+            scanned_rows += manifest.segments[index].node_count;
+        auto reserved = ReserveMaintenance(scanned_rows);
+        if (const auto* error = std::get_if<Error>(&reserved)) return *error;
+        workspace = std::get<std::shared_ptr<const BudgetReservation>>(std::move(reserved));
+        materialized = manifest.checkpoint_sequence;
         dimension = manifest.dimension;
         block_bytes = manifest.block_bytes;
         layout = manifest.layout;
         builder_name = std::string(ManifestTextView(manifest.adapter.name));
         builder_parameters = std::string(ManifestTextView(manifest.adapter.parameters));
-        const std::uint64_t budget = options.rebuild_memory.has_value()
-                                         ? options.rebuild_memory->workspace_bytes
-                                         : 0;
-        auto read = ReadAllRows(published_at_copy, budget);
-        if (const auto* error = std::get_if<Error>(&read)) return *error;
-        rows = std::get<std::vector<SegmentRecord>>(std::move(read));
-        if (rows.empty())
-            return Failure(ErrorCode::not_found, "Compaction found no rows to merge");
-        // The merged segment covers exactly what its rows carry. Anything newer
-        // stays in the delta and in the WAL, and the checkpoint sequence must
-        // not claim it.
-        for (const auto& row : rows) materialized = (std::max)(materialized, row.version);
-        if (delta) {
-            while (retire_count < delta->CommittedCount() &&
-                   delta->VersionAt(retire_count) <= materialized)
-                ++retire_count;
-        }
-        // Rotation is pinned to the published sequence: the writer expects the
-        // next file to start where the next write goes, not at the merge
-        // boundary.
-        const auto rotated = RotateWalAfter(published_at_copy);
-        if (const auto* error = std::get_if<Error>(&rotated)) return *error;
+        budget = options.rebuild_memory->workspace_bytes;
+        source_view = view;
+        source = access;
         for (std::uint32_t index = 0; index < manifest.segment_count; ++index)
             superseded.push_back(directory / "segments" /
                                  FormatUuid(manifest.segments[index].uuid));
@@ -634,6 +881,14 @@ Result<Success> Engine::Impl::RunCompaction(std::chrono::milliseconds timeout) {
         // adopting the merged generation drops the adapter that owns them.
         if (access) superseded_files = access->SegmentFiles();
     }
+    // The maintenance lock prevents another publication from dropping the
+    // source adapter and its file leases while this scan runs.
+    auto read = ReadAllRows(*source, source_view, materialized, budget,
+                           std::chrono::steady_clock::now() + timeout);
+    if (const auto* error = std::get_if<Error>(&read)) return *error;
+    auto rows = std::get<std::vector<SegmentRecord>>(std::move(read));
+    if (rows.empty())
+        return Failure(ErrorCode::not_found, "Compaction found no rows to merge");
 
     const auto staging = directory / ("merge-" + FormatUuid(NewInstanceId()));
     SegmentWriteRequest request;
@@ -647,9 +902,7 @@ Result<Success> Engine::Impl::RunCompaction(std::chrono::milliseconds timeout) {
     request.parameters = builder_parameters;
     auto written = WriteSegment(request);
     if (const auto* error = std::get_if<Error>(&written)) {
-        std::error_code ignored;
-        std::filesystem::remove_all(staging, ignored);
-        ++maintenance_errors;
+        DiscardStaging(staging);
         return *error;
     }
     const auto artifact = std::get<SegmentArtifact>(std::move(written));
@@ -657,30 +910,35 @@ Result<Success> Engine::Impl::RunCompaction(std::chrono::milliseconds timeout) {
     const auto segments_directory = directory / "segments";
     std::filesystem::create_directories(segments_directory, path_error);
     if (path_error) {
-        std::error_code ignored;
-        std::filesystem::remove_all(staging, ignored);
-        ++maintenance_errors;
+        DiscardStaging(staging);
         return Failure(ErrorCode::io_error, "Cannot create the segments directory");
     }
     const auto segment_directory = segments_directory / FormatUuid(artifact.uuid);
-    if (!MoveFileExW(staging.c_str(), segment_directory.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        std::error_code ignored;
-        std::filesystem::remove_all(staging, ignored);
-        ++maintenance_errors;
-        return Error{ErrorCode::io_error, "Cannot move the merged segment into place",
-                     static_cast<int>(GetLastError())};
+    if (!SegmentRename()(staging.c_str(), segment_directory.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        const auto code = static_cast<int>(GetLastError());
+        DiscardStaging(staging);
+        return Error{ErrorCode::io_error, "Cannot move the merged segment into place", code};
     }
 
-    std::unique_lock<std::shared_mutex> guard(mutex);
+    std::unique_lock guard(mutex);
     std::lock_guard<std::mutex> publication(publication_mutex);
     if (closed) {
-        recycle_queue.push_back(segment_directory);
+        QueueRecycle(segment_directory);
         return Failure(ErrorCode::closed, "Engine closed while the merge was staged");
     }
+    if (recovery_required) {
+        QueueRecycle(segment_directory);
+        return Error{ErrorCode::recovery_required, recovery_message};
+    }
     Manifest next = manifest;
-    next.generation = manifest.generation + 1;
-    next.checkpoint_sequence = (std::max)(manifest.checkpoint_sequence, materialized);
-    next.wal_replay_after = next.checkpoint_sequence;
+    const auto generation = NextManifestGeneration(directory, manifest.generation);
+    if (const auto* error = std::get_if<Error>(&generation)) {
+        QueueRecycle(segment_directory);
+        return *error;
+    }
+    next.generation = std::get<Generation>(generation);
+    // This merge rewrites only existing segments. The delta and its WAL still
+    // belong to the next checkpoint, including any writes made while staging.
     // A merged segment starts from exactly the rows it holds; the delta keeps
     // whatever arrived afterwards.
     next.live_count = artifact.node_count;
@@ -702,7 +960,7 @@ Result<Success> Engine::Impl::RunCompaction(std::chrono::milliseconds timeout) {
     const auto metadata_text = SetManifestText(
         entry.metadata.path, "segments/" + FormatUuid(artifact.uuid) + "/segment.json");
     if (const auto* error = std::get_if<Error>(&metadata_text)) {
-        recycle_queue.push_back(segment_directory);
+        QueueRecycle(segment_directory);
         return *error;
     }
     entry.metadata.logical_bytes = artifact.metadata_bytes;
@@ -710,39 +968,17 @@ Result<Success> Engine::Impl::RunCompaction(std::chrono::milliseconds timeout) {
     entry.metadata.sha256 = artifact.metadata_sha256;
     next.segment_count = 1;
 
-    const auto published = PublishManifest(directory, next);
-    if (const auto* error = std::get_if<Error>(&published)) {
-        recycle_queue.push_back(segment_directory);
-        ++maintenance_errors;
-        return *error;
-    }
-    auto opened = OpenIndexDirectory(directory, reader, registry, options.block_bytes,
-                                     options.max_inflight_reads);
-    if (const auto* error = std::get_if<Error>(&opened)) {
-        recovery_required = true;
-        recovery_message = "Published merged generation " + std::to_string(next.generation) +
-                           " but could not reopen it: " + error->message;
-        ++maintenance_errors;
-        last_maintenance_error = recovery_message;
-        return Error{ErrorCode::recovery_required, recovery_message};
-    }
-    const auto adopted = AdoptPublished(std::get<OpenedIndex>(std::move(opened)));
+    const auto adopted = PublishAndAdopt(next, segment_directory);
     if (const auto* error = std::get_if<Error>(&adopted)) return *error;
-    if (delta) static_cast<void>(delta->RetirePrefix(retire_count));
     PublishView();
     merge_bytes_written += artifact.staged_bytes;
     ++compactions_completed;
-    for (const auto& stale : superseded) recycle_queue.push_back(stale);
+    for (const auto& stale : superseded) QueueRecycle(stale);
     // Order matters: the new generation is live before its predecessor's files
     // are retired, and only a retired file can have its directory removed.
     for (const auto file : superseded_files) static_cast<void>(registry->Retire(file));
     static_cast<void>(registry->CollectRetired());
-    const bool fully_covered = published_at_copy == materialized;
     guard.unlock();
-    // Reclaim only when the merged segment covers everything that was
-    // published. Otherwise the closed WAL file still holds unflushed records
-    // and the next checkpoint will delete it once it covers them.
-    if (fully_covered) RecycleWalUpTo(materialized);
     RecycleDue(8);
     return Success{};
 }
@@ -763,7 +999,7 @@ void Engine::Impl::MaintenanceLoop() {
         std::uint32_t capacity = 0;
         std::uint32_t segments = 0;
         {
-            std::shared_lock<std::shared_mutex> guard(mutex);
+            std::shared_lock guard(mutex);
             if (closed || recovery_required || !delta) continue;
             committed = delta->CommittedCount();
             capacity = delta->SlotCapacity();
@@ -775,28 +1011,24 @@ void Engine::Impl::MaintenanceLoop() {
         const bool settled =
             options.maintenance_settle_flush && committed > 0 && committed == previous_committed;
         previous_committed = committed;
-        // A merge only ever reads segments, so a flush that is due always runs
-        // first. Both are attempted in the same wakeup: under a sustained write
-        // stream the flush branch would otherwise starve the merge forever.
-        if (committed >= trigger || settled) {
-            const auto done = RunCheckpoint(std::chrono::seconds(60));
-            if (const auto* error = std::get_if<Error>(&done)) {
-                last_maintenance_error = error->message;
-                ++maintenance_errors;
-            }
+        const bool needs_slot = committed > 0 && CheckpointNeedsMerge(segments);
+        if (!needs_slot && (committed >= trigger || settled)) {
+            static_cast<void>(RunCheckpoint(std::chrono::seconds(60)));
             previous_committed = 0;
-            std::shared_lock<std::shared_mutex> guard(mutex);
+            std::shared_lock guard(mutex);
             segments = closed ? segments : manifest.segment_count;
         }
-        if (segments > options.max_delta_segments) {
+        if (needs_slot || segments > options.max_delta_segments ||
+            (segments >= 2 && CheckpointNeedsMerge(segments))) {
             const auto done = RunCompaction(std::chrono::seconds(120));
             if (const auto* error = std::get_if<Error>(&done)) {
-                last_maintenance_error = error->message;
-                ++maintenance_errors;
+                RecordMaintenanceFailure(*error);
+            } else if (needs_slot) {
+                static_cast<void>(RunCheckpoint(std::chrono::seconds(60)));
             }
-            // A merge ends with its own flush, so the next wakeup starts clean.
             previous_committed = 0;
         }
+        std::lock_guard<std::mutex> maintenance_guard(maintenance_mutex);
         RecycleDue(4);
     }
 }
@@ -865,8 +1097,9 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
         if (const auto* error = std::get_if<Error>(&backend)) return *error;
         impl->backend = std::get<std::unique_ptr<SynchronousReadBackend>>(std::move(backend));
     }
-    auto reader = CreateOptimizedBlockReader(impl->governor, impl->backend,
-        {options.max_inflight_reads, prefetch, cache});
+    OptimizedReaderOptions reader_options{options.max_inflight_reads, prefetch, cache};
+    if (impl->MaintenanceEnabled()) reader_options.scheduling = options.read_scheduling;
+    auto reader = CreateOptimizedBlockReader(impl->governor, impl->backend, reader_options);
     if (const auto* error = std::get_if<Error>(&reader)) return *error;
     impl->reader = std::get<std::unique_ptr<OptimizedBlockReader>>(std::move(reader));
 
@@ -934,12 +1167,6 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
                            "Cannot create the WAL directory: " + impl->wal_directory.string());
     }
 
-    auto recovery = ScanWalDirectory(impl->wal_directory, impl->manifest.instance_id,
-                                     impl->manifest.dimension, impl->published_sequence,
-                                     options.wal);
-    if (const auto* error = std::get_if<Error>(&recovery)) return *error;
-    auto report = std::get<RecoveryReport>(std::move(recovery));
-
     // The delta is bounded twice: by the memory budget it has to live inside,
     // and by the retention limit the resource contract declares.
     const auto record_bytes = DeltaRecordBytes(impl->manifest.dimension);
@@ -948,9 +1175,14 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
                           static_cast<std::uint64_t>(options.resources.max_retained_delta_vectors));
     capacity = (std::min)(capacity,
                           static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max() / 2));
-    if (report.records.size() > capacity)
-        return Failure(ErrorCode::resource_exhausted,
-                       "The WAL holds more records than the delta can retain");
+    WalRecoveryLimits recovery_limits;
+    recovery_limits.max_records = static_cast<std::size_t>(capacity);
+    recovery_limits.max_workspace_bytes = options.memory.workspace_bytes;
+    auto recovery = ScanWalDirectory(impl->wal_directory, impl->manifest.instance_id,
+                                     impl->manifest.dimension, impl->published_sequence,
+                                     options.wal, recovery_limits);
+    if (const auto* error = std::get_if<Error>(&recovery)) return *error;
+    auto report = std::get<RecoveryReport>(std::move(recovery));
     if (capacity > 0) {
         DeltaOptions delta_options;
         delta_options.dimension = impl->manifest.dimension;
@@ -998,10 +1230,26 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
         if (impl->wal) impl->wal_file_bytes = latest.valid_bytes;
     }
 
+    // A restart may find covered logs left by a sharing violation or crash.
+    // The scan has checked each complete frame, including any log crossing C.
+    for (const auto& file : report.files) {
+        if (file.highest_sequence == 0 ||
+            file.highest_sequence > impl->manifest.checkpoint_sequence)
+            continue;
+        std::error_code remove_error;
+        if (std::filesystem::remove(file.path, remove_error)) {
+            ++impl->wal_files_reclaimed;
+        } else if (remove_error) {
+            impl->RecordMaintenanceFailure(
+                {ErrorCode::io_error, "Cannot reclaim a checkpointed WAL", remove_error.value()});
+        }
+    }
+
     impl->view.instance_id = impl->manifest.instance_id;
     impl->view.view_generation = 1;
     impl->view.manifest_generation = impl->manifest.generation;
     impl->PublishView();
+    impl->ReclaimAfterOpen();
     auto engine = std::unique_ptr<Engine>(new Engine(std::move(impl)));
     // Maintenance is opt-in: without rebuild_memory the caller has not declared
     // the workspace a checkpoint or merge would need, so nothing runs behind
@@ -1016,9 +1264,8 @@ Result<std::unique_ptr<Engine>> Engine::Open(const std::filesystem::path& direct
 Result<WriteReceipt> Engine::Impl::ApplyWrite(WalOperation operation, VectorId id,
                                               std::span<const float> values,
                                               const WriteOptions& write_options) {
+    const auto started = std::chrono::steady_clock::now();
     if (id == 0) return Failure(ErrorCode::invalid_argument, "Logical ID must be non-zero");
-    if (values.size() != manifest.dimension)
-        return Failure(ErrorCode::invalid_argument, "Write vector dimension mismatch");
     if (!AllFinite(values))
         return Failure(ErrorCode::invalid_argument,
                        "Write vector must contain finite float32 values");
@@ -1030,25 +1277,34 @@ Result<WriteReceipt> Engine::Impl::ApplyWrite(WalOperation operation, VectorId i
     // Admission happens before the publication lock: the counter bounds how
     // many writers can queue, so a stalled disk cannot build an unbounded
     // backlog of threads holding reserved slots.
-    const auto deadline = std::chrono::steady_clock::now() + write_options.admission_timeout;
-    while (true) {
-        auto current = pending_writes.load();
-        if (current < options.max_pending_writes) {
-            if (pending_writes.compare_exchange_weak(current, current + 1)) break;
-            continue;
-        }
-        if (std::chrono::steady_clock::now() >= deadline)
+    const auto deadline = started + write_options.admission_timeout;
+    {
+        std::unique_lock admission(write_admission_mutex);
+        if (!write_admission_cv.wait_until(admission, deadline, [this] {
+                return stopping.load() || pending_writes.load() < options.max_pending_writes;
+            }))
             return Failure(ErrorCode::resource_exhausted, "Write admission capacity exhausted");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (stopping.load()) return Failure(ErrorCode::closed, "Engine is closing");
+        pending_writes.fetch_add(1);
     }
     struct PendingGuard {
-        std::atomic<std::uint32_t>* counter;
-        ~PendingGuard() { counter->fetch_sub(1); }
-    } pending_guard{&pending_writes};
+        Impl& engine;
+        ~PendingGuard() {
+            {
+                std::lock_guard admission(engine.write_admission_mutex);
+                engine.pending_writes.fetch_sub(1);
+            }
+            engine.write_admission_cv.notify_one();
+        }
+    } pending_guard{*this};
 
-    std::unique_lock<std::shared_mutex> guard(mutex);
-    if (closed) return Failure(ErrorCode::closed, "Engine is closed");
+    std::unique_lock guard(mutex, deadline);
+    if (!guard.owns_lock())
+        return Failure(ErrorCode::deadline_exceeded, "Write timed out waiting for the view");
+    if (closed || stopping.load()) return Failure(ErrorCode::closed, "Engine is closing");
     if (recovery_required) return Error{ErrorCode::recovery_required, recovery_message};
+    if (values.size() != manifest.dimension)
+        return Failure(ErrorCode::invalid_argument, "Write vector dimension mismatch");
     if (!delta)
         return Failure(ErrorCode::resource_exhausted,
                        "No delta budget is configured; writes are disabled");
@@ -1060,6 +1316,8 @@ Result<WriteReceipt> Engine::Impl::ApplyWrite(WalOperation operation, VectorId i
     const bool existed = std::get<std::optional<Sequence>>(existing).has_value();
     if (operation == WalOperation::insert && existed)
         return Failure(ErrorCode::already_exists, "Logical ID already exists in the index");
+    if (std::chrono::steady_clock::now() >= deadline)
+        return Failure(ErrorCode::deadline_exceeded, "Write admission deadline expired");
 
     if (published_sequence == (std::numeric_limits<Sequence>::max)())
         return Failure(ErrorCode::resource_exhausted, "WAL sequence space is exhausted");
@@ -1163,10 +1421,9 @@ Result<WriteReceipt> Engine::Impl::ApplyWrite(WalOperation operation, VectorId i
 
 Result<SearchResult> Engine::Search(std::span<const float> query,
                                     const SearchOptions& options) {
+    const auto started = std::chrono::steady_clock::now();
     if (!impl_) return Failure(ErrorCode::closed, "Engine is closed");
     Impl& impl = *impl_;
-    if (query.size() != impl.manifest.dimension)
-        return Failure(ErrorCode::invalid_argument, "Query dimension does not match the index");
     if (options.k == 0 || options.k > options.candidate_limit)
         return Failure(ErrorCode::invalid_argument, "k must be within the candidate limit");
     if (options.candidate_limit == 0 || options.candidate_limit > 4096)
@@ -1176,8 +1433,15 @@ Result<SearchResult> Engine::Search(std::span<const float> query,
     if (options.prefetch_blocks > impl.options.max_prefetch_reads)
         return Failure(ErrorCode::invalid_argument, "Query prefetch exceeds the engine cap");
 
-    std::shared_lock guard(impl.mutex);
+    const auto deadline = started + options.timeout;
+    std::shared_lock guard(impl.mutex, deadline);
+    if (!guard.owns_lock() || std::chrono::steady_clock::now() >= deadline)
+        return Failure(ErrorCode::deadline_exceeded, "Search timed out waiting for the view");
     if (impl.closed) return Failure(ErrorCode::closed, "Engine is closed");
+    if (query.size() != impl.manifest.dimension)
+        return Failure(ErrorCode::invalid_argument, "Query dimension does not match the index");
+    if (!AllFinite(query))
+        return Failure(ErrorCode::invalid_argument, "Query vector must contain finite float32 values");
     auto slot = std::make_shared<QuerySlot>();
     auto active = impl.active_queries.load();
     do {
@@ -1188,9 +1452,6 @@ Result<SearchResult> Engine::Search(std::span<const float> query,
     ReadViewLease lease;
     lease.view = impl.view;
     lease.lifetime = impl.lifetime;
-    const auto started = std::chrono::steady_clock::now();
-    const auto deadline = started + options.timeout;
-
     SearchResult result;
     result.snapshot_sequence = lease.view.snapshot_sequence;
     result.view_generation = lease.view.view_generation;
@@ -1299,7 +1560,11 @@ Result<SearchResult> Engine::Search(std::span<const float> query,
             return left.squared_distance < right.squared_distance;
         return left.id < right.id;
     });
-    if (ordered.size() > options.k) ordered.resize(options.k);
+    const auto required = (std::min)(std::uint64_t{options.k}, lease.view.live_count);
+    if (ordered.size() < required)
+        return Failure(ErrorCode::search_incomplete,
+                       "Candidate budget did not produce enough visible neighbors");
+    ordered.resize(static_cast<std::size_t>(required));
     result.neighbors = std::move(ordered);
     result.metrics.cache_hits = query_reads->cache_hits;
     result.metrics.cache_misses = query_reads->cache_misses;
@@ -1429,7 +1694,17 @@ Result<EngineStats> Engine::Stats() const {
         stats.prefetch_ready_at_demand = reads.prefetch_ready_at_demand;
         stats.peak_inflight_reads = reads.peak_inflight_reads;
         stats.peak_prefetch_reads = reads.peak_prefetch_reads;
+        stats.background_reads_submitted = reads.background_submitted;
+        stats.peak_background_reads = reads.peak_background_reads;
     }
+    {
+        std::lock_guard maintenance(impl.maintenance_stats_mutex);
+        stats.maintenance_failures = impl.maintenance_errors;
+        stats.last_maintenance_error = impl.last_maintenance_error;
+    }
+    stats.small_merges_skipped = impl.small_merges_skipped.load();
+    stats.maintenance_workspace_peak_bytes = impl.maintenance_peak.load();
+    stats.segments_pending_reclamation = impl.recycle_pending.load();
     stats.wal_bytes_written = impl.wal_bytes_written;
     stats.checkpoint_bytes_written = impl.checkpoint_bytes_written;
     stats.merge_bytes_written = impl.merge_bytes_written;
@@ -1461,6 +1736,7 @@ Result<Success> Engine::Close() {
     // section would deadlock.
     impl.RequestStop();
     impl.JoinMaintenance();
+    const std::lock_guard maintenance_guard(impl.maintenance_mutex);
     {
         std::unique_lock guard(impl.mutex);
         if (impl.closed) return Failure(ErrorCode::closed, "Engine is already closed");

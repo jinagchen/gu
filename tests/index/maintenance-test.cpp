@@ -10,6 +10,8 @@
 
 #include "../../src/index/builder.hpp"
 #include "../../src/index/delta.hpp"
+#include "../../src/index/digest.hpp"
+#include "../../src/index/publish.hpp"
 #include "../../src/index/reader.hpp"
 
 #include <windows.h>
@@ -22,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -272,6 +275,255 @@ bool WaitFor(const std::function<bool()>& predicate, std::chrono::milliseconds t
 
 // --- cases ---------------------------------------------------------------
 
+void RequirePublished(const Fixture& fixture, Generation generation, Sequence checkpoint) {
+    const auto described = DescribeIndex(fixture.index);
+    const auto* index = std::get_if<IndexDescription>(&described);
+    Require(index && index->generation == generation && index->checkpoint_sequence == checkpoint,
+            "CURRENT resolves to the expected manifest and checkpoint");
+    std::ifstream pointer(fixture.index / "CURRENT", std::ios::binary);
+    const std::string text{std::istreambuf_iterator<char>(pointer), {}};
+    const auto decoded = DecodeCurrent(text);
+    const auto* current = std::get_if<CurrentRecord>(&decoded);
+    if (!current) {
+        Require(false, "CURRENT decodes");
+        return;
+    }
+    const auto hashed = HashFile(fixture.index / current->manifest);
+    const auto* hash = std::get_if<Digest>(&hashed);
+    Require(hash && *hash == current->manifest_sha256, "CURRENT carries the actual manifest hash");
+}
+
+BOOL WINAPI FailSegmentRename(LPCWSTR, LPCWSTR, DWORD) {
+    SetLastError(ERROR_ACCESS_DENIED);
+    return FALSE;
+}
+
+void TestCheckpointRetriesAfterFailedCurrentWrite() {
+    using namespace std::chrono_literals;
+    for (const bool restart : {false, true}) {
+        auto fixture = Prepare(restart ? "retry-restart" : "retry-in-place");
+        auto engine = OpenFixture(fixture, Options());
+        if (!engine) return;
+        const auto values = FarVector(fixture, 0);
+        const VectorId id = 900001;
+        Require(std::holds_alternative<WriteReceipt>(
+                    engine->Insert(id, values, WriteOptions{})),
+                "retry fixture write is confirmed");
+        const auto obstruction = fixture.index / "CURRENT.tmp";
+        Require(std::filesystem::create_directory(obstruction), "CURRENT write is obstructed");
+        const auto failed = engine->Checkpoint(5s);
+        const auto* error = std::get_if<Error>(&failed);
+        Require(error && error->code == ErrorCode::io_error, "obstructed checkpoint fails");
+        Require(std::filesystem::is_regular_file(fixture.index / "manifests/manifest-2.json"),
+                "failed CURRENT write leaves an unpublished manifest");
+        RequirePublished(fixture, 1, 0);
+        Require(QueryIds(*engine, values, 1) == std::vector<VectorId>{id},
+                "failed checkpoint leaves the confirmed write readable");
+        Require(std::filesystem::remove(obstruction), "CURRENT obstruction is removed");
+        if (restart) {
+            static_cast<void>(engine->Close());
+            engine = OpenFixture(fixture, Options());
+            if (!engine) return;
+        }
+        const auto retried = engine->Checkpoint(5s);
+        const auto* receipt = std::get_if<CheckpointReceipt>(&retried);
+        Require(receipt && receipt->manifest_generation > 2 && receipt->checkpoint_sequence == 1,
+                "checkpoint retries beyond the unused manifest generation");
+        if (receipt) RequirePublished(fixture, receipt->manifest_generation, 1);
+        static_cast<void>(engine->Close());
+        engine = OpenFixture(fixture, Options());
+        if (!engine) return;
+        Require(QueryIds(*engine, values, 1) == std::vector<VectorId>{id},
+                "checkpoint retry preserves the confirmed write across reopen");
+        const auto next = engine->Upsert(id, FarVector(fixture, 1), WriteOptions{});
+        const auto* write = std::get_if<WriteReceipt>(&next);
+        Require(write && write->sequence == 2, "writes continue after retry");
+        Require(std::holds_alternative<CheckpointReceipt>(engine->Checkpoint(5s)),
+                "checkpoints continue after retry");
+    }
+}
+
+void TestCheckpointPublicationFailureBoundaries() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("publish-faults");
+    auto engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    const auto segment = std::filesystem::directory_iterator(fixture.index / "segments");
+    Require(segment != std::filesystem::directory_iterator{}, "base segment exists");
+    if (segment == std::filesystem::directory_iterator{}) return;
+    const auto metadata = segment->path() / "segment.json";
+    const VectorId id = 900002;
+    const auto values = FarVector(fixture, 0);
+    Require(std::holds_alternative<WriteReceipt>(engine->Insert(id, values, WriteOptions{})),
+            "publication fault fixture confirms a write");
+
+    const auto native_rename = SegmentRename();
+    SegmentRename() = FailSegmentRename;
+    const auto rename_failure = engine->Checkpoint(5s);
+    SegmentRename() = native_rename;
+    const auto* rename_error = std::get_if<Error>(&rename_failure);
+    Require(rename_error && rename_error->code == ErrorCode::io_error &&
+                rename_error->system_error == ERROR_ACCESS_DENIED,
+            "segment rename failure preserves the native error");
+    RequirePublished(fixture, 1, 0);
+    Require(SegmentDirectories(fixture) == 1, "the failed rename cannot publish a new segment");
+
+    const auto manifest_temp = fixture.index / "manifests/manifest-2.json.tmp";
+    Require(std::filesystem::create_directory(manifest_temp), "manifest write is obstructed");
+    const auto manifest_failure = engine->Checkpoint(5s);
+    const auto* manifest_error = std::get_if<Error>(&manifest_failure);
+    Require(manifest_error && manifest_error->message == "Cannot write the manifest",
+            "manifest staging failure is reported");
+    RequirePublished(fixture, 1, 0);
+    Require(std::filesystem::remove(manifest_temp), "manifest obstruction is removed");
+
+    const auto current = fixture.index / "CURRENT";
+    HANDLE held = CreateFileW(current.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(held != INVALID_HANDLE_VALUE, "CURRENT is open without delete sharing");
+    if (held == INVALID_HANDLE_VALUE) return;
+    const auto switch_failure = engine->Checkpoint(5s);
+    CloseHandle(held);
+    const auto* switch_error = std::get_if<Error>(&switch_failure);
+    Require(switch_error && switch_error->code == ErrorCode::io_error &&
+                switch_error->message.find("Cannot switch CURRENT") == 0,
+            "CURRENT replacement failure leaves the old generation available");
+    RequirePublished(fixture, 1, 0);
+
+    // The adapter already opened the base and does not keep segment.json open.
+    // Deny metadata reads to fail reopening only after CURRENT switches.
+    held = CreateFileW(metadata.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(held != INVALID_HANDLE_VALUE, "base segment metadata is held exclusively");
+    if (held == INVALID_HANDLE_VALUE) return;
+    const auto reopen_failure = engine->Checkpoint(5s);
+    CloseHandle(held);
+    const auto* reopen_error = std::get_if<Error>(&reopen_failure);
+    Require(reopen_error && reopen_error->code == ErrorCode::recovery_required,
+            "new generation reopen failure requires recovery");
+    RequirePublished(fixture, 3, 1);
+    const auto stopped = engine->Upsert(id, FarVector(fixture, 1), WriteOptions{});
+    const auto* stopped_error = std::get_if<Error>(&stopped);
+    Require(stopped_error && stopped_error->code == ErrorCode::recovery_required,
+            "no write is confirmed after a failed adoption");
+    Require(!WalFiles(fixture).empty(), "WAL remains after a failed adoption");
+
+    static_cast<void>(engine->Close());
+    engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    Require(QueryIds(*engine, values, 1) == std::vector<VectorId>{id},
+            "restart adopts the published generation with the confirmed write");
+    const auto next = engine->Upsert(id, FarVector(fixture, 1), WriteOptions{});
+    const auto* write = std::get_if<WriteReceipt>(&next);
+    Require(write && write->sequence == 2, "restart allows the next write sequence");
+    Require(std::holds_alternative<CheckpointReceipt>(engine->Checkpoint(5s)),
+            "restart allows another checkpoint after failed adoption");
+}
+
+void TestMaintenanceDrainsFullManifest() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("full-manifest");
+    auto legacy_fixture = Options();
+    legacy_fixture.resources.max_disk_segments = kMaxManifestSegments + 1;
+    auto engine = OpenFixture(fixture, legacy_fixture);
+    if (!engine) return;
+    const VectorId base = 910000;
+    for (std::uint32_t i = 0; i < kMaxManifestSegments - 1; ++i) {
+        Require(std::holds_alternative<WriteReceipt>(
+                    engine->Insert(base + i, FarVector(fixture, i), WriteOptions{})),
+                "full manifest fixture write");
+        Require(std::holds_alternative<CheckpointReceipt>(engine->Checkpoint(5s)),
+                "full manifest fixture checkpoint");
+    }
+    Require(SegmentDirectories(fixture) == kMaxManifestSegments, "all manifest slots are occupied");
+    // The newest value of an existing ID is in the WAL, not in any of the segments.
+    const auto tail = FarVector(fixture, kMaxManifestSegments);
+    const auto updated = engine->Upsert(base, tail, WriteOptions{});
+    const auto* write = std::get_if<WriteReceipt>(&updated);
+    Require(write && write->sequence == kMaxManifestSegments, "WAL tail is confirmed");
+    static_cast<void>(engine->Close());
+
+    // With one delta slot the WAL tail already occupies the available budget.
+    auto constrained = Options(DeltaRecordBytes(fixture.dimension), true);
+    constrained.rebuild_memory->reserve_bytes += constrained.rebuild_memory->workspace_bytes - 1;
+    constrained.rebuild_memory->workspace_bytes = 1;
+    engine = OpenFixture(fixture, constrained);
+    if (!engine) return;
+    const auto checkpoint = engine->Checkpoint(5s);
+    const auto* checkpoint_error = std::get_if<Error>(&checkpoint);
+    Require(checkpoint_error && checkpoint_error->code == ErrorCode::resource_exhausted,
+            "a full manifest rejects checkpointing before it stages a segment");
+    const auto refused = engine->Insert(base + kMaxManifestSegments, tail, WriteOptions{});
+    const auto* refused_error = std::get_if<Error>(&refused);
+    Require(refused_error && refused_error->code == ErrorCode::resource_exhausted,
+            "the exhausted delta budget rejects writes while the WAL tail is pinned");
+    RequirePublished(fixture, kMaxManifestSegments, kMaxManifestSegments - 1);
+    static_cast<void>(engine->Close());
+
+    // Hold the next checkpoint after the merge. Reopening between the two
+    // publications must replay the tail without advancing the merge's cut.
+    const auto tail_checkpoint = fixture.index / "manifests" /
+        ("manifest-" + std::to_string(kMaxManifestSegments + 2) + ".json.tmp");
+    Require(std::filesystem::create_directory(tail_checkpoint), "tail checkpoint is obstructed");
+    // A soft threshold must not prevent freeing a slot at the hard limit.
+    auto options = PolicyOptions(1, kMaxManifestSegments, true, 1ull << 30);
+    engine = OpenFixture(fixture, options);
+    if (!engine) return;
+    const bool merged = WaitFor([&]() {
+        const auto stats = engine->Stats();
+        const auto* value = std::get_if<EngineStats>(&stats);
+        return value && value->merge_bytes_written > 0 &&
+               value->checkpoint_sequence == kMaxManifestSegments - 1;
+    }, 10s);
+    Require(merged, "maintenance frees a slot even when the tail checkpoint is obstructed");
+    static_cast<void>(engine->Close());
+    RequirePublished(fixture, kMaxManifestSegments + 1, kMaxManifestSegments - 1);
+    engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    const auto replayed = engine->Get(base);
+    const auto* tail_record = std::get_if<StoredVector>(&replayed);
+    Require(tail_record && tail_record->version == kMaxManifestSegments &&
+                tail_record->values == tail,
+            "restart between merge and checkpoint replays the confirmed WAL tail");
+    static_cast<void>(engine->Close());
+    Require(std::filesystem::remove(tail_checkpoint), "tail checkpoint obstruction is removed");
+    engine = OpenFixture(fixture, options);
+    if (!engine) return;
+    const bool drained = WaitFor([&]() {
+        const auto stats = engine->Stats();
+        const auto* value = std::get_if<EngineStats>(&stats);
+        return value && value->published_sequence == kMaxManifestSegments &&
+               value->checkpoint_sequence == kMaxManifestSegments &&
+               value->merge_backlog_bytes == 0;
+    }, 10s);
+    Require(drained, "maintenance frees a slot and drains the remaining WAL tail");
+    static_cast<void>(engine->Close());
+    engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+
+    SearchOptions search;
+    search.k = 1;
+    search.candidate_limit = 64;
+    const auto found = engine->Search(tail, search);
+    const auto* answer = std::get_if<SearchResult>(&found);
+    Require(answer && answer->neighbors.size() == 1 && answer->neighbors[0].id == base &&
+                answer->neighbors[0].version == kMaxManifestSegments,
+            "latest version of the WAL tail is visible after restart");
+    for (std::uint32_t i = 1; i < kMaxManifestSegments - 1; ++i) {
+        const auto read = engine->Get(base + i);
+        const auto* stored = std::get_if<StoredVector>(&read);
+        Require(stored && stored->version == i + 1 && stored->values == FarVector(fixture, i),
+                "materialized write retains its exact version and payload after restart");
+    }
+    const auto next = engine->Insert(base + kMaxManifestSegments, FarVector(fixture, 30),
+                                     WriteOptions{});
+    const auto* next_write = std::get_if<WriteReceipt>(&next);
+    Require(next_write && next_write->sequence == kMaxManifestSegments + 1,
+            "writes continue after draining a full manifest");
+    Require(std::holds_alternative<CheckpointReceipt>(engine->Checkpoint(5s)),
+            "checkpoints continue after draining a full manifest");
+}
+
 void TestCheckpointPublishesWithoutChangingAnswers() {
     auto fixture = Prepare("publish");
     auto engine = OpenFixture(fixture, Options());
@@ -316,7 +568,11 @@ void TestCheckpointPublishesWithoutChangingAnswers() {
     if (std::holds_alternative<StoredVector>(stored))
         Require(std::get<StoredVector>(stored).version == published,
                 "the checkpointed version is the one that was written");
-    static_cast<void>(engine->Close());
+    Require(!AsError(engine->Close()), "the checkpointed engine closes");
+    const auto after_close = engine->Checkpoint(std::chrono::milliseconds(5000));
+    const auto* error = std::get_if<Error>(&after_close);
+    Require(error && error->code == ErrorCode::closed,
+            "checkpoint after close refuses before touching the file registry");
 }
 
 void TestRestartAfterCheckpointDoesNotReplay() {
@@ -569,6 +825,176 @@ void TestMergeSurvivesRestart() {
                     "the sequence continues from the merged checkpoint");
         static_cast<void>(engine->Close());
     }
+}
+
+void TestMaintenanceRejectsInsufficientResources() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("maintenance-budgets");
+    auto options = Options(8u << 20, true);
+    options.maintenance_interval = 1h;
+    options.resources.background_workspace_bytes = 1;
+    const auto check_failure = [&](const EngineOptions& constrained, const char* reason) {
+        auto engine = OpenFixture(fixture, constrained);
+        if (!engine) return;
+        const auto stats = std::get<EngineStats>(engine->Stats());
+        if (stats.published_sequence == 0) {
+            Require(std::holds_alternative<WriteReceipt>(
+                        engine->Insert(970000, FarVector(fixture, 0), WriteOptions{})),
+                    "maintenance budget fixture confirms a write");
+        }
+        const auto checkpoint = engine->Checkpoint(5s);
+        const auto* error = std::get_if<Error>(&checkpoint);
+        Require(error && error->code == ErrorCode::resource_exhausted &&
+                    error->message.find(reason) != std::string::npos,
+                "checkpoint reports the limiting resource");
+        const auto after = std::get<EngineStats>(engine->Stats());
+        Require(after.published_sequence == 1 && after.checkpoint_sequence == 0 &&
+                    after.maintenance_failures == 1 && after.maintenance_workspace_peak_bytes == 0,
+                "rejected staging preserves the WAL tail and exposes the failure");
+        static_cast<void>(engine->Close());
+    };
+    check_failure(options, "workspace");
+    options = Options();
+    const auto total_disk = std::filesystem::space(fixture.index).capacity;
+    options.resources.min_free_disk_bytes = total_disk;
+    check_failure(options, "staging disk");
+    auto engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    Require(std::holds_alternative<CheckpointReceipt>(engine->Checkpoint(5s)),
+            "reopening with sufficient resources checkpoints the confirmed write");
+    const auto after = std::get<EngineStats>(engine->Stats());
+    Require(after.checkpoint_sequence == 1 && after.merge_backlog_bytes == 0 &&
+                after.maintenance_workspace_peak_bytes >= (2u << 20),
+            "checkpoint exposes the workspace reservation and drains the tail");
+    static_cast<void>(engine->Close());
+}
+
+void TestReclamationRetriesAfterSharingViolation() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("reclaim-retry");
+    const auto original = std::filesystem::directory_iterator(fixture.index / "segments")->path();
+    const auto graph = original / "graph.bin";
+    auto engine = OpenFixture(fixture, PolicyOptions(1, 1, true, 0));
+    if (!engine) return;
+    // A read handle without delete sharing models a file still pinned after adoption.
+    const auto held = CreateFileW(graph.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(held != INVALID_HANDLE_VALUE, "old graph is held open");
+    if (held == INVALID_HANDLE_VALUE) return;
+    Require(std::holds_alternative<WriteReceipt>(
+                engine->Insert(971000, FarVector(fixture, 0), WriteOptions{})),
+            "reclamation fixture confirms a write");
+    const bool queued = WaitFor([&] {
+        const auto stats = std::get<EngineStats>(engine->Stats());
+        return stats.merge_bytes_written > 0 && stats.segments_pending_reclamation == 1;
+    }, 10s);
+    Require(queued, "sharing violation leaves the old segment queued after merge");
+    char byte{};
+    DWORD read = 0;
+    Require(std::filesystem::exists(graph) && ReadFile(held, &byte, 1, &read, nullptr) &&
+                read == 1, "the pinned graph remains readable");
+    CloseHandle(held);
+    Require(WaitFor([&] {
+        const auto stats = std::get<EngineStats>(engine->Stats());
+        return stats.segments_pending_reclamation == 0 && SegmentDirectories(fixture) == 1;
+    }, 10s), "maintenance retries cleanup after the handle is released");
+    const auto stats = std::get<EngineStats>(engine->Stats());
+    Require(stats.background_reads_submitted > 0 && stats.peak_background_reads == 1,
+            "real merge graph reads are admitted as background work");
+    static_cast<void>(engine->Close());
+}
+
+void TestRestartRediscoversRetiredSegments() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("reclaim-restart");
+    const auto original = std::filesystem::directory_iterator(fixture.index / "segments")->path();
+    const auto graph = original / "graph.bin";
+    auto engine = OpenFixture(fixture, PolicyOptions(1, 1, true, 0));
+    if (!engine) return;
+    const auto held = CreateFileW(graph.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(held != INVALID_HANDLE_VALUE, "the superseded graph is held across restart");
+    if (held == INVALID_HANDLE_VALUE) return;
+
+    constexpr VectorId id = 971100;
+    const auto values = FarVector(fixture, 0);
+    Require(std::holds_alternative<WriteReceipt>(engine->Insert(id, values, {})),
+            "the restart fixture confirms a write");
+    Require(WaitFor([&] {
+        const auto stats = std::get<EngineStats>(engine->Stats());
+        return stats.merge_bytes_written > 0 && stats.segments_pending_reclamation == 1;
+    }, 10s), "the published merge leaves its held predecessor on disk");
+    Require(!AsError(engine->Close()), "the first instance closes");
+    engine.reset();
+
+    const auto staged = fixture.index / ("checkpoint-" + FormatUuid(NewInstanceId()));
+    const auto unknown = fixture.index / ("merge-" + FormatUuid(NewInstanceId()));
+    std::filesystem::create_directory(staged);
+    std::filesystem::create_directory(unknown);
+    std::ofstream(staged / "graph.bin").put('x');
+    std::ofstream(unknown / "graph.bin").put('x');
+    std::ofstream(unknown / "keep.txt").put('x');
+    engine = OpenFixture(fixture, PolicyOptions(1, 1, true, 0));
+    const bool still_held = std::filesystem::exists(graph);
+    CloseHandle(held);
+    if (!engine) return;
+
+    Require(still_held && !std::filesystem::exists(staged),
+            "startup preserves the held graph and removes the abandoned staging directory");
+    Require(std::filesystem::exists(unknown / "graph.bin") &&
+                std::filesystem::exists(unknown / "keep.txt"),
+            "startup preserves a directory with unknown contents");
+    Require(WaitFor([&] { return !std::filesystem::exists(original); }, 10s),
+            "maintenance retries the rediscovered segment once the handle is released");
+    const auto read = engine->Get(id);
+    const auto* stored = std::get_if<StoredVector>(&read);
+    Require(stored && stored->version == 1 && stored->values == values &&
+                SegmentDirectories(fixture) == 1,
+            "the live merged segment remains readable and is the sole published directory");
+    static_cast<void>(engine->Close());
+}
+
+void TestDiskSegmentBudgetIncludesRetiredFiles() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("segment-budget");
+    const auto original = std::filesystem::directory_iterator(fixture.index / "segments")->path();
+    auto options = PolicyOptions(1, kMaxManifestSegments, true, 0);
+    options.resources.max_disk_segments = 3;
+    auto engine = OpenFixture(fixture, options);
+    if (!engine) return;
+    const auto held = CreateFileW((original / "graph.bin").c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(held != INVALID_HANDLE_VALUE, "a segment can remain pinned after a budget-driven merge");
+    if (held == INVALID_HANDLE_VALUE) return;
+
+    constexpr VectorId first = 971200;
+    const auto values = FarVector(fixture, 0);
+    Require(std::holds_alternative<WriteReceipt>(engine->Insert(first, values, {})),
+            "the first write fills the checkpoint slot");
+    const bool retired = WaitFor([&] {
+        const auto stats = std::get<EngineStats>(engine->Stats());
+        return stats.merge_bytes_written > 0 && stats.segments_pending_reclamation == 1;
+    }, 10s);
+    Require(retired, "maintenance uses the reserved slot to merge before admitting another segment");
+    Require(std::holds_alternative<WriteReceipt>(engine->Insert(first + 1, values, {})),
+            "WAL still accepts a write while old disk space is pinned");
+    const auto checkpoint = engine->Checkpoint(5s);
+    const auto* error = std::get_if<Error>(&checkpoint);
+    Require(error && error->code == ErrorCode::resource_exhausted &&
+                SegmentDirectories(fixture) == 2,
+            "a pinned retired segment counts against staging capacity");
+    Require(std::get<EngineStats>(engine->Stats()).checkpoint_sequence == 1,
+            "the rejected checkpoint keeps the durable tail");
+    CloseHandle(held);
+
+    Require(WaitFor([&] {
+        const auto stats = std::get<EngineStats>(engine->Stats());
+        return stats.checkpoint_sequence == 2 && stats.segments_pending_reclamation == 0 &&
+               SegmentDirectories(fixture) <= 3;
+    }, 10s), "cleanup frees the slot and maintenance checkpoints the WAL tail");
+    Require(std::holds_alternative<StoredVector>(engine->Get(first + 1)),
+            "the acknowledged tail remains readable");
+    static_cast<void>(engine->Close());
 }
 
 // A generation switch replaces the adapter under readers. Queries running while
@@ -967,6 +1393,59 @@ RateResult RunAtRate(const std::string& name, const EngineOptions& options, std:
     return result;
 }
 
+void TestWritersProgressUnderContinuousReads() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("writer-progress");
+    auto engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+
+    const auto probe = VectorFor(fixture, 7);
+    std::atomic<bool> stop_readers{false};
+    std::atomic<std::uint32_t> reads{0};
+    std::atomic<std::uint32_t> read_errors{0};
+    std::vector<std::thread> readers;
+    for (int index = 0; index < 4; ++index) {
+        readers.emplace_back([&] {
+            SearchOptions options;
+            options.k = 10;
+            options.candidate_limit = 64;
+            while (!stop_readers.load()) {
+                if (std::holds_alternative<SearchResult>(engine->Search(probe, options)))
+                    ++reads;
+                else
+                    ++read_errors;
+            }
+        });
+    }
+    Require(WaitFor([&] { return reads.load() >= 4; }, 5s), "continuous readers start");
+
+    constexpr std::uint32_t writes_per_thread = 16;
+    constexpr VectorId first_id = 980000;
+    std::atomic<std::uint32_t> finished_writers{0};
+    std::atomic<std::uint32_t> confirmed{0};
+    const auto write = [&](VectorId start) {
+        for (std::uint32_t index = 0; index < writes_per_thread; ++index)
+            if (std::holds_alternative<WriteReceipt>(
+                    engine->Insert(start + index, probe, WriteOptions{})))
+                ++confirmed;
+        ++finished_writers;
+    };
+    std::thread left(write, first_id);
+    std::thread right(write, first_id + writes_per_thread);
+    const bool progressed = WaitFor([&] { return finished_writers.load() == 2; }, 5s);
+    stop_readers.store(true);
+    for (auto& reader : readers) reader.join();
+    left.join();
+    right.join();
+    Require(progressed, "both writers complete before the continuous readers stop");
+    Require(confirmed.load() == 2 * writes_per_thread && read_errors.load() == 0,
+            "continuous reads and concurrent writes succeed");
+    const auto stats = std::get<EngineStats>(engine->Stats());
+    Require(stats.published_sequence == 2 * writes_per_thread,
+            "concurrent writers publish a contiguous sequence");
+    static_cast<void>(engine->Close());
+}
+
 // The declared rate is the one the delivered policy holds with a bounded
 // backlog and no refused write. The higher arms are reported, not asserted: they
 // show where the full-rewrite merge stops keeping up, which is the honest
@@ -1116,14 +1595,22 @@ int main() {
     };
     run("CheckpointPublishesWithoutChangingAnswers",
         &TestCheckpointPublishesWithoutChangingAnswers);
+    run("CheckpointRetriesAfterFailedCurrentWrite", &TestCheckpointRetriesAfterFailedCurrentWrite);
+    run("CheckpointPublicationFailureBoundaries", &TestCheckpointPublicationFailureBoundaries);
+    run("MaintenanceDrainsFullManifest", &TestMaintenanceDrainsFullManifest);
     run("RestartAfterCheckpointDoesNotReplay", &TestRestartAfterCheckpointDoesNotReplay);
     run("MergesKeepSegmentsBounded", &TestMergesKeepSegmentsBounded);
     run("MergeSurvivesRestart", &TestMergeSurvivesRestart);
+    run("MaintenanceRejectsInsufficientResources", &TestMaintenanceRejectsInsufficientResources);
+    run("ReclamationRetriesAfterSharingViolation", &TestReclamationRetriesAfterSharingViolation);
+    run("RestartRediscoversRetiredSegments", &TestRestartRediscoversRetiredSegments);
+    run("DiskSegmentBudgetIncludesRetiredFiles", &TestDiskSegmentBudgetIncludesRetiredFiles);
     run("QueryResultsSurviveMerge", &TestQueryResultsSurviveMerge);
     run("QueriesAnswerAcrossGenerationSwitches", &TestQueriesAnswerAcrossGenerationSwitches);
     run("BackgroundMaintenanceFlushesWithoutACall",
         &TestBackgroundMaintenanceFlushesWithoutACall);
     run("MaintenancePolicyAblation", &TestMaintenancePolicyAblation);
+    run("WritersProgressUnderContinuousReads", &TestWritersProgressUnderContinuousReads);
     run("SustainedWriteRate", &TestSustainedWriteRate);
     run("SettleRuleIsAblatable", &TestSettleRuleIsAblatable);
 

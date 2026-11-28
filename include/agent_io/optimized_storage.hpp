@@ -13,7 +13,7 @@ struct OptimizedReaderOptions {
     std::uint32_t max_inflight_reads;
     std::uint32_t max_prefetch_reads;
     bool cache_enabled;
-    // Opt-in until the Engine has a maintenance caller.
+    // Background read quotas are optional for callers without maintenance.
     std::optional<ReadScheduling> scheduling = std::nullopt;
 };
 

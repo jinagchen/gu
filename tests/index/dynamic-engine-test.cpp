@@ -21,9 +21,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <semaphore>
 #include <string>
 #include <thread>
 #include <vector>
@@ -264,11 +266,27 @@ void ExpectUnchangedCorruption(const Fixture& fixture, const EngineOptions& opti
 }
 
 enum class NativeFault { none, seek, truncate, flush, publish, attach, kill_on_recovery_flush,
-                         kill_after_frame_flush };
+                         kill_after_frame_flush, short_write, append_error, partial_disk_full };
 NativeFault g_wal_fault = NativeFault::none;
 unsigned g_wal_seeks = 0, g_wal_truncates = 0, g_wal_flushes = 0;
+unsigned g_wal_writes = 0;
 constexpr DWORD kRecoveryCrashExit = 44;
 constexpr DWORD kUnrepliedCrashExit = 45;
+thread_local std::binary_semaphore* g_flush_entered = nullptr;
+thread_local std::binary_semaphore* g_flush_resume = nullptr;
+
+BOOL WINAPI TestWalWrite(HANDLE file, LPCVOID data, DWORD bytes, LPDWORD done, LPOVERLAPPED io) {
+    const auto call = ++g_wal_writes;
+    if (g_wal_fault == NativeFault::append_error ||
+        (g_wal_fault == NativeFault::partial_disk_full && call > 1)) {
+        SetLastError(g_wal_fault == NativeFault::append_error ? ERROR_WRITE_FAULT : ERROR_DISK_FULL);
+        return FALSE;
+    }
+    if ((g_wal_fault == NativeFault::short_write ||
+         g_wal_fault == NativeFault::partial_disk_full) && call == 1)
+        bytes = (std::min)(bytes, DWORD{12});
+    return WriteFile(file, data, bytes, done, io);
+}
 
 BOOL WINAPI TestWalSeek(HANDLE file, LARGE_INTEGER offset, PLARGE_INTEGER result, DWORD mode) {
     ++g_wal_seeks;
@@ -286,6 +304,11 @@ BOOL WINAPI TestWalTruncate(HANDLE file) {
 
 BOOL WINAPI TestWalFlush(HANDLE file) {
     ++g_wal_flushes;
+    if (g_flush_entered) {
+        g_flush_entered->release();
+        g_flush_entered = nullptr;
+        g_flush_resume->acquire();
+    }
     if (g_wal_fault == NativeFault::flush) {
         SetLastError(ERROR_WRITE_FAULT);
         return FALSE;
@@ -316,8 +339,9 @@ struct WalFaultScope {
     wal_detail::NativeIo prior = wal_detail::CurrentNativeIo();
     explicit WalFaultScope(NativeFault fault) {
         g_wal_fault = fault;
-        g_wal_seeks = g_wal_truncates = g_wal_flushes = 0;
+        g_wal_seeks = g_wal_truncates = g_wal_flushes = g_wal_writes = 0;
         auto& io = wal_detail::CurrentNativeIo();
+        io.write = TestWalWrite;
         io.seek = TestWalSeek;
         io.truncate = TestWalTruncate;
         io.flush = TestWalFlush;
@@ -722,6 +746,146 @@ void TestRotatedEmptyWalIsAdopted() {
             "both confirmed frames replay across rotation");
 }
 
+void TestWriteFaultsAtEngineBoundary() {
+    for (const auto native : {NativeFault::short_write, NativeFault::append_error,
+                              NativeFault::partial_disk_full, NativeFault::flush}) {
+        auto fixture = Prepare("write-fault");
+        WalFaultScope fault(NativeFault::none);
+        auto engine = OpenFixture(fixture, Options());
+        if (!engine) return;
+        Require(HasReceipt(engine->Insert(kTailConfirmed, kFirstValues, {}), kTailConfirmed, 1),
+                "an acknowledged prefix exists before the write fault");
+        g_wal_fault = native;
+        g_wal_writes = 0;
+        const auto attempted = engine->Insert(kTailTorn, kNextValues, {});
+        if (native == NativeFault::short_write) {
+            Require(g_wal_writes == 2 && HasReceipt(attempted, kTailTorn, 2),
+                    "a successful short write is completed before acknowledgment");
+        } else {
+            const auto* error = AsError(attempted);
+            const auto expected = native == NativeFault::partial_disk_full
+                ? ERROR_DISK_FULL : ERROR_WRITE_FAULT;
+            Require(error && error->code == ErrorCode::io_error &&
+                        error->system_error == expected && error->attempted_sequence == 2 &&
+                        error->write_effect == WriteEffect::may_have_applied,
+                    "failed append or sync reports the attempted sequence as uncertain");
+            Require(AsError(engine->Get(kTailTorn)) != nullptr,
+                    "an uncertain write is not visible in the running engine");
+            const auto refused = engine->Insert(kTailContinued, kFirstValues, {});
+            const auto* refused_error = AsError(refused);
+            Require(refused_error && refused_error->code == ErrorCode::recovery_required &&
+                        refused_error->write_effect == WriteEffect::none &&
+                        !refused_error->attempted_sequence,
+                    "a later request stops before getting a sequence or writing bytes");
+        }
+        g_wal_fault = NativeFault::none;
+        engine.reset();
+        engine = OpenFixture(fixture, Options());
+        if (!engine) return;
+        Require(HasVector(*engine, kTailConfirmed, 1, kFirstValues),
+                "the acknowledged prefix survives the write fault");
+        const bool complete = native == NativeFault::short_write || native == NativeFault::flush;
+        if (complete)
+            Require(HasVector(*engine, kTailTorn, 2, kNextValues),
+                    "recovery replays a complete frame, including a failed sync");
+        else
+            Require(AsError(engine->Get(kTailTorn)) != nullptr,
+                    "recovery discards a missing or partial frame");
+        Require(HasReceipt(engine->Insert(kTailContinued, kFirstValues, {}),
+                           kTailContinued, complete ? 3 : 2),
+                "recovery continues at the sequence after the complete prefix");
+    }
+}
+
+void TestWriteAdmissionTimeoutAndClose() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("admission-close");
+    auto options = Options();
+    options.max_pending_writes = 1;
+    auto engine = OpenFixture(fixture, options);
+    if (!engine) return;
+    std::binary_semaphore entered(0), resume(0);
+    auto active = std::async(std::launch::async, [&] {
+        WalFaultScope fault(NativeFault::none);
+        g_flush_entered = &entered;
+        g_flush_resume = &resume;
+        return engine->Insert(kTailConfirmed, kFirstValues, {});
+    });
+    const bool stalled = entered.try_acquire_for(5s);
+    Require(stalled, "first write occupies the only admission slot");
+    if (!stalled) {
+        resume.release();
+        return;
+    }
+    const auto timed_out = engine->Insert(kTailTorn, kNextValues, WriteOptions{20ms});
+    const auto* error = AsError(timed_out);
+    Require(error && error->code == ErrorCode::resource_exhausted &&
+                !error->attempted_sequence,
+            "capacity wait times out before writing any WAL bytes");
+
+    auto queued = std::async(std::launch::async, [&] {
+        return engine->Insert(kTailContinued, kNextValues, WriteOptions{30s});
+    });
+    auto closing = std::async(std::launch::async, [&] { return engine->Close(); });
+    const bool woke = queued.wait_for(5s) == std::future_status::ready;
+    resume.release();
+    Require(woke, "closing wakes a waiting writer while the active one is stalled");
+    const auto closed = queued.get();
+    Require(AsError(closed) && AsError(closed)->code == ErrorCode::closed,
+            "the queued writer is refused during close");
+    Require(HasReceipt(active.get(), kTailConfirmed, 1),
+            "an already active write can finish before close");
+    Require(!AsError(closing.get()), "close completes");
+}
+
+void TestViewAdmissionHonorsDeadlines() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("view-admission");
+    auto options = Options();
+    options.max_pending_writes = 2;
+    auto engine = OpenFixture(fixture, options);
+    if (!engine) return;
+
+    std::binary_semaphore entered(0), resume(0);
+    auto active = std::async(std::launch::async, [&] {
+        WalFaultScope fault(NativeFault::none);
+        g_flush_entered = &entered;
+        g_flush_resume = &resume;
+        return engine->Insert(kTailConfirmed, kFirstValues, {});
+    });
+    const bool stalled = entered.try_acquire_for(5s);
+    Require(stalled, "a write holds the view during WAL sync");
+    if (!stalled) {
+        resume.release();
+        return;
+    }
+
+    auto search = std::async(std::launch::async, [&] {
+        SearchOptions request;
+        request.timeout = 25ms;
+        return engine->Search(kFirstValues, request);
+    });
+    auto write = std::async(std::launch::async, [&] {
+        return engine->Insert(kTailTorn, kNextValues, WriteOptions{25ms});
+    });
+    const bool search_completed = search.wait_for(3s) == std::future_status::ready;
+    const bool write_completed = write.wait_for(3s) == std::future_status::ready;
+    resume.release();
+
+    const auto search_result = search.get();
+    const auto write_result = write.get();
+    Require(search_completed && AsError(search_result) &&
+                AsError(search_result)->code == ErrorCode::deadline_exceeded,
+            "a query times out while the view is still locked");
+    const auto* error = AsError(write_result);
+    Require(write_completed && error && error->code == ErrorCode::deadline_exceeded &&
+                error->write_effect == WriteEffect::none && !error->attempted_sequence,
+            "a write times out after admission without attempting a WAL frame");
+    Require(HasReceipt(active.get(), kTailConfirmed, 1) &&
+                HasReceipt(engine->Insert(kTailTorn, kNextValues, {}), kTailTorn, 2),
+            "the next attempt uses the next contiguous WAL sequence");
+}
+
 void TestRecoveryIoFailuresAndRetry() {
     auto fixture = Prepare("tail-retry");
     {
@@ -892,6 +1056,118 @@ void TestDeltaCapacityIsEnforced() {
             std::get<Error>(third).code == ErrorCode::resource_exhausted,
             "a write beyond the delta capacity is refused");
     static_cast<void>(engine->Close());
+    const auto before = WalContents(fixture);
+    const auto constrained = Engine::Open(fixture.index, Options(record_bytes));
+    const auto* error = AsError(constrained);
+    Require(error && error->code == ErrorCode::resource_exhausted,
+            "recovery refuses a replay larger than the delta limit");
+    Require(WalContents(fixture) == before, "recovery budget refusal preserves WAL bytes");
+    engine = OpenFixture(fixture, Options(record_bytes * 2));
+    if (!engine) return;
+    Require(HasVector(*engine, 950001, 1, VectorFor(fixture, 0)) &&
+                HasVector(*engine, 950002, 2, VectorFor(fixture, 1)),
+            "both writes recover when the replay budget is restored");
+}
+
+void TestWalHistoryWorkspaceLimit() {
+    auto fixture = Prepare("recovery-workspace");
+    const auto instance = FixtureInstance(fixture);
+    const auto values = VectorFor(fixture, 0);
+    constexpr Sequence records = 24;
+    for (Sequence sequence = 1; sequence <= records; ++sequence) {
+        const auto name = "history-" + std::to_string(sequence) + ".log";
+        const auto path = WriteWalHeader(fixture, name.c_str(), instance, sequence);
+        Require(AppendFramePrefix(path, sequence, 960000 + sequence, values, 0),
+                "create complete historical WAL frame");
+    }
+    const auto before = WalContents(fixture);
+    auto options = Options();
+    WalRecoveryLimits limits;
+    limits.max_workspace_bytes = 4096;
+    const auto constrained = ScanWalDirectory(fixture.index / "wal", instance, fixture.dimension,
+                                              0, options.wal, limits);
+    const auto* error = AsError(constrained);
+    Require(error && error->code == ErrorCode::resource_exhausted &&
+                error->message.find("workspace") != std::string::npos,
+            "WAL history cannot exceed its configured workspace budget");
+    Require(WalContents(fixture) == before, "budget refusal leaves historical WAL bytes intact");
+    auto engine = OpenFixture(fixture, options);
+    if (!engine) return;
+    Require(HasVector(*engine, 960001, 1, values) &&
+                HasVector(*engine, 960000 + records, records, values),
+            "the confirmed prefix and tail recover under the ordinary workspace budget");
+}
+
+constexpr Sequence kRecoveryStudyFiles = 1024;
+constexpr Sequence kRecoveryStudyFramesPerFile = 8;
+constexpr VectorId kRecoveryStudyFirstId = 980000;
+
+int PrepareRecoveryStudy() {
+    const auto fixture = Prepare("recovery-study");
+    if (g_failures != 0) return 2;
+    const auto instance = FixtureInstance(fixture);
+    for (Sequence file = 0; file < kRecoveryStudyFiles; ++file) {
+        const auto first = file * kRecoveryStudyFramesPerFile + 1;
+        const auto name = "history-" + std::to_string(first) + ".log";
+        const auto path = WriteWalHeader(fixture, name.c_str(), instance, first);
+        for (Sequence sequence = first; sequence < first + kRecoveryStudyFramesPerFile; ++sequence)
+            if (!AppendFramePrefix(path, sequence, kRecoveryStudyFirstId + sequence,
+                                   kFirstValues, 0))
+                return 3;
+    }
+    std::puts(fixture.index.string().c_str());
+    return g_failures ? 4 : 0;
+}
+
+int MeasureRecoveryStudy(const char* index_path) {
+    constexpr auto frames = kRecoveryStudyFiles * kRecoveryStudyFramesPerFile;
+    const auto begin = std::chrono::steady_clock::now();
+    auto opened = Engine::Open(index_path, Options());
+    const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - begin).count();
+    const auto* engine = std::get_if<std::unique_ptr<Engine>>(&opened);
+    if (!engine) {
+        std::fprintf(stderr, "%s\n", std::get<Error>(opened).message.c_str());
+        return 2;
+    }
+    const auto stats_result = (*engine)->Stats();
+    const auto* stats = std::get_if<EngineStats>(&stats_result);
+    if (!stats || stats->published_sequence != frames ||
+        !HasVector(**engine, kRecoveryStudyFirstId + 1, 1, kFirstValues) ||
+        !HasVector(**engine, kRecoveryStudyFirstId + frames, frames, kFirstValues))
+        return 3;
+    std::printf("files=%llu frames=%llu open_ms=%.3f published_sequence=%llu\n",
+                static_cast<unsigned long long>(kRecoveryStudyFiles),
+                static_cast<unsigned long long>(frames), elapsed_ms,
+                static_cast<unsigned long long>(stats->published_sequence));
+    return 0;
+}
+
+void TestRestartReclaimsOnlyCoveredWal() {
+    using namespace std::chrono_literals;
+    auto fixture = Prepare("reclaim-covered-wal");
+    constexpr VectorId covered_id = 966001;
+    constexpr VectorId tail_id = 966002;
+    const auto values = VectorFor(fixture, 0);
+    auto engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    Require(HasReceipt(engine->Insert(covered_id, values, {}), covered_id, 1),
+            "covered write is confirmed");
+    Require(std::holds_alternative<CheckpointReceipt>(engine->Checkpoint(5s)),
+            "covered write reaches the index");
+    Require(HasReceipt(engine->Insert(tail_id, values, {}), tail_id, 2),
+            "uncovered write is confirmed in its own WAL");
+    static_cast<void>(engine->Close());
+
+    const auto stale = WriteWalHeader(fixture, "covered.log", FixtureInstance(fixture), 1);
+    Require(AppendFramePrefix(stale, 1, covered_id, values, 0),
+            "restore a complete covered file as if its deletion failed");
+    engine = OpenFixture(fixture, Options());
+    if (!engine) return;
+    Require(!std::filesystem::exists(stale) && WalFiles(fixture).size() == 1,
+            "recovery retires the covered log and leaves the uncovered one");
+    Require(HasVector(*engine, covered_id, 1, values) && HasVector(*engine, tail_id, 2, values),
+            "the stored and replayed writes stay visible");
 }
 
 // Silence is the failure mode that matters here: a damaged WAL that still opens
@@ -1246,6 +1522,10 @@ void TestProcessCrashRecovery() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--prepare-recovery-study")
+        return PrepareRecoveryStudy();
+    if (argc == 3 && std::string_view(argv[1]) == "--measure-recovery-study")
+        return MeasureRecoveryStudy(argv[2]);
     if (argc >= 4 && std::string(argv[1]) == "--crash-child")
         return CrashChild(argv[2], std::atoi(argv[3]));
     if (argc == 3 && std::string(argv[1]) == "--tail-recovery-child")
@@ -1264,6 +1544,9 @@ int main(int argc, char** argv) {
     TestTornTailThenConfirmedWriteSurvivesAnotherOpen();
     TestEmptyLatestWalIsAdopted();
     TestRotatedEmptyWalIsAdopted();
+    TestWriteFaultsAtEngineBoundary();
+    TestWriteAdmissionTimeoutAndClose();
+    TestViewAdmissionHonorsDeadlines();
     TestRecoveryIoFailuresAndRetry();
     TestCompleteUnrepliedFrameReplays();
     TestNewWalPublicationFailures();
@@ -1273,6 +1556,8 @@ int main(int argc, char** argv) {
     TestScanToRepairRevalidation();
     TestRefusals();
     TestDeltaCapacityIsEnforced();
+    TestWalHistoryWorkspaceLimit();
+    TestRestartReclaimsOnlyCoveredWal();
     TestEmptyCheckpointIsANoop();
     TestProcessCrashRecovery();
 

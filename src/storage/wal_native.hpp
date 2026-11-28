@@ -2,7 +2,7 @@
 
 #include "agent_io/storage.hpp"
 
-#include <vector>
+#include <functional>
 #include <windows.h>
 
 namespace agent_io::wal_detail {
@@ -28,12 +28,10 @@ struct WalFileSnapshot {
     std::array<std::byte, kWalHeaderBytes> encoded_header{};
 };
 
-struct ScannedWalFile {
-    WalFileSnapshot snapshot;
-    std::vector<std::byte> bytes;
-};
-
-Result<ScannedWalFile> ReadWalForRecovery(const std::filesystem::path& path);
+Result<WalFileSnapshot> ReadWalHeaderForRecovery(const std::filesystem::path& path);
+Result<Success> ScanWalFrames(const WalFileSnapshot& snapshot, std::span<std::byte> buffer,
+                             const std::function<Result<Success>(
+                                 std::span<const std::byte>)>& visit);
 
 // A successful result holds a writer only when the latest log is empty after
 // tail repair. The writer takes ownership of the handle used for the flush.

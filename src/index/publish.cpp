@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -35,7 +36,31 @@ bool FlushPath(const std::filesystem::path& path) {
     return flushed;
 }
 
+std::string ManifestName(Generation generation) {
+    return "manifest-" + std::to_string(generation) + ".json";
+}
+
 }  // namespace
+
+decltype(&::MoveFileExW)& SegmentRename() {
+    thread_local auto rename = &::MoveFileExW;
+    return rename;
+}
+
+Result<Generation> NextManifestGeneration(const std::filesystem::path& directory,
+                                          Generation current) {
+    const auto manifests = directory / "manifests";
+    // A failed switch may leave immutable manifests ahead of CURRENT.
+    while (current < (std::numeric_limits<Generation>::max)()) {
+        const auto candidate = manifests / ManifestName(++current);
+        std::error_code error;
+        const bool occupied = std::filesystem::exists(candidate, error);
+        if (error) return Failure(ErrorCode::io_error, "Cannot inspect manifest generation",
+                                  error.value());
+        if (!occupied) return current;
+    }
+    return Failure(ErrorCode::resource_exhausted, "Manifest generation space is exhausted");
+}
 
 Result<PublishedManifest> PublishManifest(const std::filesystem::path& directory,
                                           const Manifest& manifest) {
@@ -58,13 +83,15 @@ Result<PublishedManifest> PublishManifest(const std::filesystem::path& directory
     const auto encoded = EncodeManifest(manifest, bytes);
     if (const auto* error = std::get_if<Error>(&encoded)) return *error;
 
-    const auto final_path = manifests_directory /
-        ("manifest-" + std::to_string(manifest.generation) + ".json");
+    const auto name = ManifestName(manifest.generation);
+    const auto final_path = manifests_directory / name;
     if (std::filesystem::exists(final_path, path_error))
         return Failure(ErrorCode::already_exists,
                        "Manifest generation already exists; generation must increase");
-    const auto temp_path = manifests_directory /
-        ("manifest-" + std::to_string(manifest.generation) + ".json.tmp");
+    if (path_error)
+        return Failure(ErrorCode::io_error, "Cannot inspect manifest destination",
+                       path_error.value());
+    const auto temp_path = manifests_directory / (name + ".tmp");
     if (!WriteWhole(temp_path, bytes))
         return Failure(ErrorCode::io_error, "Cannot write the manifest");
     if (!FlushPath(temp_path))
@@ -78,7 +105,7 @@ Result<PublishedManifest> PublishManifest(const std::filesystem::path& directory
 
     CurrentRecord current;
     current.instance_id = manifest.instance_id;
-    current.manifest = "manifests/manifest-" + std::to_string(manifest.generation) + ".json";
+    current.manifest = "manifests/" + name;
     current.manifest_sha256 = std::get<Digest>(digest);
     const auto current_text = EncodeCurrent(current);
     if (const auto* error = std::get_if<Error>(&current_text)) return *error;
@@ -91,24 +118,23 @@ Result<PublishedManifest> PublishManifest(const std::filesystem::path& directory
         return Failure(ErrorCode::io_error, "Cannot flush CURRENT",
                        static_cast<int>(GetLastError()));
     const auto current_path = directory / "CURRENT";
-    const bool existed = std::filesystem::exists(current_path, path_error);
-    bool published = false;
-    if (existed) {
-        const auto backup = directory / ("CURRENT.bak-" + FormatUuid(NewInstanceId()));
-        published = ReplaceFileW(current_path.c_str(), current_temp.c_str(), backup.c_str(),
-                                 REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) != 0;
-        if (!published) {
-            std::error_code ignored;
-            std::filesystem::remove(backup, ignored);
-        }
-    } else {
-        published = MoveFileExW(current_temp.c_str(), current_path.c_str(),
-                                MOVEFILE_WRITE_THROUGH) != 0;
-    }
-    if (!published)
+    const auto previous = HashFile(current_path);
+    const auto* previous_digest = std::get_if<Digest>(&previous);
+    if (!previous_digest)
+        return Failure(ErrorCode::recovery_required, "Cannot verify CURRENT before replacement");
+    const auto backup = directory / ("CURRENT.bak-" + FormatUuid(NewInstanceId()));
+    if (!ReplaceFileW(current_path.c_str(), current_temp.c_str(), backup.c_str(),
+                      REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) {
+        const auto code = static_cast<int>(GetLastError());
+        const auto actual = HashFile(current_path);
+        const auto* actual_digest = std::get_if<Digest>(&actual);
+        if (!actual_digest || *actual_digest != *previous_digest)
+            return Failure(ErrorCode::recovery_required,
+                           "Cannot determine the active generation after replacing CURRENT", code);
         return Failure(ErrorCode::io_error,
                        "Cannot switch CURRENT; the previous generation is unchanged",
-                       static_cast<int>(GetLastError()));
+                       code);
+    }
 
     PublishedManifest result;
     result.generation = manifest.generation;

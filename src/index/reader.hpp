@@ -28,7 +28,10 @@ class VectorAccess {
 public:
     virtual ~VectorAccess() = default;
     virtual Result<StoredVector> ReadVector(SegmentId segment, NativeNodeId node,
-                                            Sequence snapshot) = 0;
+                                            Sequence snapshot,
+                                            const BlockReadOptions& options = {
+                                                ReadPriority::demand,
+                                                (std::chrono::steady_clock::time_point::max)()}) = 0;
     virtual Result<std::optional<VersionDirectoryEntry>> FindId(SegmentId segment,
                                                                 VectorId id) = 0;
     // Files this generation pins. A superseded generation may only be deleted

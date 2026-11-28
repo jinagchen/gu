@@ -94,9 +94,8 @@ struct EngineOptions {
     std::uint32_t max_inflight_reads = 64;
     std::uint32_t max_prefetch_reads = 16;
     std::uint32_t max_delta_segments = 4;
-    // A merge is refused while the live segments hold fewer than this many
-    // bytes, so two nearly empty segments are not rewritten for nothing. Zero
-    // merges as soon as the segment budget is exceeded.
+    // Skip small merges below this many live segment bytes. Zero disables the
+    // threshold, and the hard manifest slot limit always overrides it.
     std::uint64_t merge_min_bytes = 0;
     // Background maintenance flushes the delta into a segment once this many
     // records are published. Zero means half of the delta slot capacity.
@@ -187,6 +186,13 @@ struct EngineStats {
     std::uint64_t prefetch_ready_at_demand = 0;
     std::uint32_t peak_inflight_reads = 0;
     std::uint32_t peak_prefetch_reads = 0;
+    std::uint64_t background_reads_submitted = 0;
+    std::uint32_t peak_background_reads = 0;
+    std::uint64_t maintenance_failures = 0;
+    std::uint64_t small_merges_skipped = 0;
+    std::uint64_t maintenance_workspace_peak_bytes = 0;
+    std::uint64_t segments_pending_reclamation = 0;
+    std::string last_maintenance_error;
 };
 
 // Declaration-only contract. No engine implementation is supplied here.

@@ -276,7 +276,8 @@ public:
             const auto* state = FindSegment(candidate.segment);
             if (state == nullptr) return Corrupt("Candidate segment is unknown");
             std::vector<float> values;
-            const auto row = ReadNode(*state, candidate.node, deadline, values);
+            const auto row = ReadNode(*state, candidate.node,
+                                      BlockReadOptions{ReadPriority::demand, deadline}, values);
             if (const auto* error = std::get_if<Error>(&row)) return *error;
             const auto& node_row = std::get<NodeRow>(row);
             if (node_row.id != candidate.id)
@@ -311,12 +312,14 @@ public:
     }
 
     Result<StoredVector> ReadVector(SegmentId segment, NativeNodeId node,
-                                   Sequence snapshot) override {
+                                   Sequence snapshot, const BlockReadOptions& options) override {
         const auto* state = FindSegment(segment);
         if (state == nullptr) return Error{ErrorCode::not_found, "Unknown segment"};
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        const auto deadline = (std::min)(options.deadline,
+            std::chrono::steady_clock::now() + std::chrono::seconds(30));
         std::vector<float> values;
-        const auto row = ReadNode(*state, node, deadline, values);
+        const auto row = ReadNode(*state, node, BlockReadOptions{options.priority, deadline},
+                                  values);
         if (const auto* error = std::get_if<Error>(&row)) return *error;
         const auto& node_row = std::get<NodeRow>(row);
         if (node_row.version > snapshot)
@@ -361,7 +364,7 @@ private:
     }
 
     Result<NodeRow> ReadNode(const SegmentState& state, NativeNodeId node,
-                             std::chrono::steady_clock::time_point deadline,
+                             const BlockReadOptions& options,
                              std::vector<float>& scratch) const {
         const auto& layout = state.descriptor.layout;
         const std::uint32_t block_bytes = state.descriptor.block_bytes;
@@ -382,8 +385,8 @@ private:
         std::vector<std::byte> row(layout.row_bytes);
         for (std::size_t begin = 0; begin < blocks; begin += max_batch_blocks_) {
             const auto count = (std::min)(static_cast<std::size_t>(max_batch_blocks_), blocks - begin);
-            auto leases = reader_->ReadBatch(std::span<const BlockLocation>(locations).subspan(begin, count),
-                                             BlockReadOptions{ReadPriority::demand, deadline});
+            auto leases = reader_->ReadBatch(
+                std::span<const BlockLocation>(locations).subspan(begin, count), options);
             if (const auto* error = std::get_if<Error>(&leases)) return *error;
             const auto& batch = std::get<std::vector<BlockLeasePtr>>(leases);
             if (batch.size() != count) return Corrupt("Short batch from the block reader");
@@ -523,7 +526,8 @@ private:
                     })->distance;
             if (results.size() >= working && current.distance > worst) break;
             frontier.pop();
-            auto row = ReadNode(state, current.node, request.deadline, scratch);
+            auto row = ReadNode(state, current.node,
+                                BlockReadOptions{ReadPriority::demand, request.deadline}, scratch);
             if (const auto* error = std::get_if<Error>(&row)) return *error;
             counters.logical_blocks_read += layout.row_bytes / state.descriptor.block_bytes;
             counters.logical_bytes_read += layout.row_bytes;

@@ -22,6 +22,7 @@
 #include "../storage/wal_native.hpp"
 
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,7 +30,7 @@
 namespace agent_io {
 
 struct WalFileSummary {
-    std::string name;
+    std::filesystem::path path;
     Sequence start_sequence = 0;
     Sequence highest_sequence = 0;
     std::uint64_t frames = 0;
@@ -62,15 +63,23 @@ struct RecoveryReport {
     std::optional<LatestWalRecovery> latest;
 };
 
+struct WalRecoveryLimits {
+    std::size_t max_files = 65536;
+    std::size_t max_records = 65536;
+    std::uint64_t max_workspace_bytes = (std::numeric_limits<std::uint64_t>::max)();
+};
+
 // Scans `wal_directory` for files of `instance_id` and returns the records that
 // still have to be applied above `checkpoint_sequence`. A missing directory is
 // an empty history, not an error. Any ambiguity -- a foreign instance, a
-// duplicate start sequence, a gap, a truncated non-final file -- is corruption.
+// duplicate start sequence, a gap after the checkpoint, a truncated non-final
+// file -- is corruption.
 Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directory,
                                         const InstanceId& instance_id,
                                         std::uint32_t dimension,
                                         Sequence checkpoint_sequence,
-                                        const WalOptions& options);
+                                        const WalOptions& options,
+                                        WalRecoveryLimits limits = {});
 
 // Removes WAL files whose header start sequence is at or below `up_to`.
 //

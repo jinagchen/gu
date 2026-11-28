@@ -16,7 +16,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -97,7 +99,7 @@ double Distance(const float* left, const float* right, std::uint32_t dimension) 
     return total;
 }
 
-void TestManifest() {
+Manifest SampleManifest() {
     Manifest manifest;
     manifest.instance_id = NewInstanceId();
     manifest.generation = 1;
@@ -114,6 +116,11 @@ void TestManifest() {
         SetManifestText(manifest.adapter.native_version, "1.0.0")), "adapter version");
     Require(std::holds_alternative<Success>(
         SetManifestText(manifest.adapter.parameters, "R16")), "adapter parameters");
+    return manifest;
+}
+
+void TestManifest() {
+    auto manifest = SampleManifest();
     manifest.segment_count = 1;
     auto& entry = manifest.segments[0];
     entry.id = 1;
@@ -395,6 +402,19 @@ void TestBuildAndSearch(Fixture& fixture) {
     over.candidate_limit = 64;
     Require(std::holds_alternative<Error>(engine->Search(query, over)),
             "K above the candidate limit is rejected");
+    SearchOptions one = search;
+    one.k = 1;
+    const auto nearest = engine->Search(query, one);
+    const auto* nearest_result = std::get_if<SearchResult>(&nearest);
+    Require(nearest_result && nearest_result->neighbors.size() == 1,
+            "K=1 returns one neighbor");
+    SearchOptions incomplete = search;
+    incomplete.k = 65;
+    incomplete.candidate_limit = 65;
+    const auto short_result = engine->Search(query, incomplete);
+    const auto* short_error = std::get_if<Error>(&short_result);
+    Require(short_error && short_error->code == ErrorCode::search_incomplete,
+            "the per-segment candidate cap cannot produce a short success");
 
     // The baseline is now writable: a durable write appended to a static index
     // must be acknowledged and survive as a new version, not be rejected.
@@ -425,6 +445,88 @@ void TestBuildAndSearch(Fixture& fixture) {
 
     Require(std::holds_alternative<Success>(engine->Close()), "engine closes");
     Require(std::holds_alternative<Error>(engine->Search(query, search)), "closed engine rejects");
+}
+
+void TestSmallSearchBoundaries() {
+    auto fixture = Prepare("top-k", 20261128);
+    const auto empty = fixture.root / "empty";
+    std::filesystem::create_directories(empty / "manifests");
+    const auto manifest = SampleManifest();
+    const auto bytes = Expect(ManifestBytes(manifest), "empty manifest size");
+    std::vector<std::byte> encoded(static_cast<std::size_t>(bytes));
+    if (Expect(EncodeManifest(manifest, encoded), "empty manifest encodes") != bytes ||
+        encoded.empty())
+        return;
+    CurrentRecord current;
+    current.instance_id = manifest.instance_id;
+    current.manifest = "manifests/manifest-1.json";
+    {
+        std::ofstream file(empty / current.manifest, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(encoded.data()),
+                   static_cast<std::streamsize>(encoded.size()));
+    }
+    current.manifest_sha256 = Expect(HashFile(empty / current.manifest), "empty manifest hash");
+    {
+        std::ofstream file(empty / "CURRENT", std::ios::binary);
+        file << Expect(EncodeCurrent(current), "empty CURRENT encodes");
+    }
+    EngineOptions options;
+    options.memory = TestBudget();
+    options.max_queries = 4;
+    SearchOptions search;
+    search.k = 10;
+    search.candidate_limit = 16;
+    std::vector<float> query(fixture.dimension, 0.0f);
+    auto opened = Engine::Open(empty, options);
+    Require(std::holds_alternative<std::unique_ptr<Engine>>(opened), "empty index opens");
+    if (auto* engine = std::get_if<std::unique_ptr<Engine>>(&opened)) {
+        const auto result = (*engine)->Search(query, search);
+        const auto* found = std::get_if<SearchResult>(&result);
+        Require(found && found->snapshot_sequence == 0 && found->neighbors.empty(),
+                "empty index returns zero neighbors, even for positive K");
+        Require(std::holds_alternative<Success>((*engine)->Close()), "empty index closes");
+    }
+
+    fixture.count = 2;
+    {
+        const std::vector<float> zeros(fixture.count * fixture.dimension, 0.0f);
+        const VectorId ids[] = {20, 10};
+        std::ofstream vectors(fixture.vectors, std::ios::binary | std::ios::trunc);
+        vectors.write(reinterpret_cast<const char*>(zeros.data()),
+                      static_cast<std::streamsize>(zeros.size() * sizeof(float)));
+        std::ofstream identifiers(fixture.ids, std::ios::binary | std::ios::trunc);
+        identifiers.write(reinterpret_cast<const char*>(ids), sizeof(ids));
+    }
+    Require(std::holds_alternative<BuildOutcome>(RunFirstBuild(BuildRequestFor(fixture))),
+            "two-row index builds");
+    opened = Engine::Open(fixture.index, options);
+    Require(std::holds_alternative<std::unique_ptr<Engine>>(opened), "two-row index opens");
+    if (auto* engine = std::get_if<std::unique_ptr<Engine>>(&opened)) {
+        std::vector<Result<SearchResult>> results(4);
+        std::vector<std::jthread> workers;
+        for (auto& result : results) {
+            workers.emplace_back([&, target = &result] {
+                *target = (*engine)->Search(query, search);
+            });
+        }
+        workers.clear();
+        for (const auto& result : results) {
+            const auto* found = std::get_if<SearchResult>(&result);
+            Require(found && found->neighbors.size() == 2 &&
+                        found->neighbors[0].id == 10 && found->neighbors[1].id == 20 &&
+                        found->neighbors[0].squared_distance == 0 &&
+                        found->neighbors[1].squared_distance == 0,
+                    "concurrent K above live count returns both tied rows in ID order");
+        }
+        query.front() = (std::numeric_limits<float>::quiet_NaN)();
+        const auto invalid = (*engine)->Search(query, search);
+        const auto* failure = std::get_if<Error>(&invalid);
+        Require(failure && failure->code == ErrorCode::invalid_argument,
+                "nonfinite query values are rejected");
+        Require(std::holds_alternative<Success>((*engine)->Close()), "two-row index closes");
+    }
+    std::error_code error;
+    std::filesystem::remove_all(fixture.root, error);
 }
 
 void TestBuildRejections() {
@@ -477,6 +579,7 @@ int main() {
     TestBuildAndSearch(fixture);
     std::error_code error;
     std::filesystem::remove_all(fixture.root, error);
+    TestSmallSearchBoundaries();
     TestBuildRejections();
     std::printf("checks=%d failures=%d\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

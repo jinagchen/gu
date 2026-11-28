@@ -10,6 +10,7 @@
 #include "agent_io/index.hpp"
 
 #include <filesystem>
+#include <windows.h>
 
 namespace agent_io {
 
@@ -19,6 +20,10 @@ struct PublishedManifest {
     Digest manifest_sha256{};
 };
 
+Result<Generation> NextManifestGeneration(const std::filesystem::path& directory,
+                                          Generation current);
+// The explicit checkpoint tests substitute a native rename failure on their caller thread.
+decltype(&::MoveFileExW)& SegmentRename();
 Result<PublishedManifest> PublishManifest(const std::filesystem::path& directory,
                                           const Manifest& manifest);
 

@@ -74,25 +74,29 @@ std::optional<Failure> ReadExact(HANDLE handle, std::span<std::byte> output) {
     return {};
 }
 
+Result<Success> VerifySnapshot(HANDLE file, const WalFileSnapshot& snapshot) {
+    auto inspected = InspectFile(file, snapshot.path);
+    if (const auto* error = std::get_if<Error>(&inspected)) return *error;
+    const auto& current = std::get<WalFileSnapshot>(inspected);
+    if (current.identity.VolumeSerialNumber != snapshot.identity.VolumeSerialNumber ||
+        std::memcmp(&current.identity.FileId, &snapshot.identity.FileId, sizeof(FILE_ID_128)) != 0 ||
+        current.scanned_bytes != snapshot.scanned_bytes)
+        return NativeFailure("WAL identity or size changed during recovery",
+                             ERROR_INVALID_DATA).AsError();
+    std::array<std::byte, kHeaderBytes> encoded_header{};
+    if (auto failure = ReadExact(file, encoded_header)) return failure->AsError();
+    if (encoded_header != snapshot.encoded_header)
+        return NativeFailure("WAL header changed during recovery", ERROR_INVALID_DATA).AsError();
+    return Success{};
+}
+
 Result<Success> OpenVerified(NativeFile& file, const WalFileSnapshot& snapshot,
                              const NativeIo& io) {
     file.handle = io.open(snapshot.path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                          OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (file.handle == INVALID_HANDLE_VALUE)
         return NativeFailure("Open existing WAL for writing", GetLastError()).AsError();
-    auto inspected = InspectFile(file.handle, snapshot.path);
-    if (const auto* error = std::get_if<Error>(&inspected)) return *error;
-    const auto& current = std::get<WalFileSnapshot>(inspected);
-    if (current.identity.VolumeSerialNumber != snapshot.identity.VolumeSerialNumber ||
-        std::memcmp(&current.identity.FileId, &snapshot.identity.FileId, sizeof(FILE_ID_128)) != 0 ||
-        current.scanned_bytes != snapshot.scanned_bytes)
-        return NativeFailure("WAL identity or size changed before opening for write",
-                             ERROR_INVALID_DATA).AsError();
-    std::array<std::byte, kHeaderBytes> encoded_header{};
-    if (auto failure = ReadExact(file.handle, encoded_header)) return failure->AsError();
-    if (encoded_header != snapshot.encoded_header)
-        return NativeFailure("WAL header changed before opening for write", ERROR_INVALID_DATA).AsError();
-    return Success{};
+    return VerifySnapshot(file.handle, snapshot);
 }
 
 std::optional<Failure> ValidateWriter(const std::filesystem::path& directory,
@@ -300,7 +304,7 @@ NativeIo& CurrentNativeIo() {
     return io;
 }
 
-Result<ScannedWalFile> ReadWalForRecovery(const std::filesystem::path& path) {
+Result<WalFileSnapshot> ReadWalHeaderForRecovery(const std::filesystem::path& path) {
     NativeFile file;
     file.handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                               OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -312,10 +316,32 @@ Result<ScannedWalFile> ReadWalForRecovery(const std::filesystem::path& path) {
     const auto size = snapshot.scanned_bytes;
     if (size < kHeaderBytes || size > kMaxWalFileBytes)
         return Failure{ErrorCode::corruption, "WAL file size is outside the supported range"}.AsError();
-    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
-    if (auto failure = ReadExact(file.handle, bytes)) return failure->AsError();
-    std::copy_n(bytes.begin(), kHeaderBytes, snapshot.encoded_header.begin());
-    return ScannedWalFile{std::move(snapshot), std::move(bytes)};
+    if (auto failure = ReadExact(file.handle, snapshot.encoded_header)) return failure->AsError();
+    return snapshot;
+}
+
+Result<Success> ScanWalFrames(const WalFileSnapshot& snapshot, std::span<std::byte> buffer,
+                             const std::function<Result<Success>(
+                                 std::span<const std::byte>)>& visit) {
+    if (buffer.empty())
+        return Error{ErrorCode::invalid_argument, "WAL scan needs a frame buffer"};
+    NativeFile file;
+    file.handle = CreateFileW(snapshot.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file.handle == INVALID_HANDLE_VALUE)
+        return NativeFailure("Open WAL frames for read-only recovery scan", GetLastError()).AsError();
+    const auto verified = VerifySnapshot(file.handle, snapshot);
+    if (const auto* error = std::get_if<Error>(&verified)) return *error;
+    auto remaining = snapshot.scanned_bytes - kHeaderBytes;
+    while (remaining != 0) {
+        auto frame = buffer.first(static_cast<std::size_t>(
+            (std::min)(remaining, static_cast<std::uint64_t>(buffer.size()))));
+        if (auto failure = ReadExact(file.handle, frame)) return failure->AsError();
+        const auto result = visit(frame);
+        if (const auto* error = std::get_if<Error>(&result)) return *error;
+        remaining -= frame.size();
+    }
+    return Success{};
 }
 
 Result<std::unique_ptr<WalWriter>> FinishWalRecovery(
