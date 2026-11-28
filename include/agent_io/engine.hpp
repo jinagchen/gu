@@ -94,6 +94,20 @@ struct EngineOptions {
     std::uint32_t max_inflight_reads = 64;
     std::uint32_t max_prefetch_reads = 16;
     std::uint32_t max_delta_segments = 4;
+    // A merge is refused while the live segments hold fewer than this many
+    // bytes, so two nearly empty segments are not rewritten for nothing. Zero
+    // merges as soon as the segment budget is exceeded.
+    std::uint64_t merge_min_bytes = 0;
+    // Background maintenance flushes the delta into a segment once this many
+    // records are published. Zero means half of the delta slot capacity.
+    // Maintenance also needs rebuild_memory: a segment build allocates its own
+    // workspace and must not borrow the query budget.
+    std::uint32_t checkpoint_trigger_vectors = 0;
+    // Also flush when the write stream pauses, even below the trigger. Turning
+    // this off makes maintenance strictly threshold driven; it is the ablation
+    // arm for the one adaptive rule the maintenance loop has.
+    bool maintenance_settle_flush = true;
+    std::chrono::milliseconds maintenance_interval{50};
     std::chrono::milliseconds group_commit_window{1};
 };
 

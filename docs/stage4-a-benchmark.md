@@ -54,15 +54,13 @@ stdout.log / stderr.log 本程序的汇总与诊断
 
 ## 复现
 
-先按 [README 的快速开始](../README.md#快速开始)配置 Release 和独立的 Debug 构建目录。使用阶段二引导脚本生成的构建目录时，将 `$debugBuild` 设为 `build/windows-stage2-debug`。Debug 只运行本节构建的目标所对应的 CTest。
+在已有工具链环境中：
 
 ```powershell
-$debugBuild = 'build/windows-debug'
 cmake --build build/windows --config Release
 ctest --test-dir build/windows -C Release --output-on-failure
-cmake --build $debugBuild --config Debug --target vector_bench benchmark_runner_test synchronous_storage_test agent_io_contracts windows_environment_probe job_runner
-ctest --test-dir $debugBuild -C Debug --output-on-failure `
-  -R '^(benchmark_runner|benchmark_cli|synchronous_storage|windows_environment_probe|job_process_tree|job_commit_rejection)$'
+cmake --build build/windows --config Debug --target vector_bench benchmark_runner_test synchronous_storage_test agent_io_contracts windows_environment_probe job_runner
+ctest --test-dir build/windows -C Debug --output-on-failure
 
 .\build\windows\Release\vector_bench.exe `
   --config configs/examples/benchmark-contract-test.json `

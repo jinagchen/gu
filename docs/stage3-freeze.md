@@ -52,16 +52,15 @@
 | Manifest 契约检查 | 22/22；覆盖字段缺失/未知、身份、越界、布局、路径、长度、哈希字段与合法多块行；只验证 schema 示例，不是 C++ codec 实现 |
 | Release/Debug CTest | 各 9/9 通过；包含存储、基准、进程树与提交拒绝探针及新增清单检查 |
 
-重跑前按 [README 的快速开始](../README.md#快速开始)配置 Release 和独立的 Debug 构建目录。使用阶段二引导脚本生成的构建目录时，将下方的 `$debugBuild` 设为 `build/windows-stage2-debug`。
+重跑命令：
 
 ```powershell
 $stage3Cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
 $stage3Ctest = Join-Path (Split-Path $stage3Cmake) 'ctest.exe'
-$debugBuild = 'build/windows-debug'
 & $stage3Cmake --build build/windows --config Release
-& $stage3Cmake --build $debugBuild --config Debug
+& $stage3Cmake --build build/windows --config Debug
 & $stage3Ctest --test-dir build/windows -C Release --output-on-failure
-& $stage3Ctest --test-dir $debugBuild -C Debug --output-on-failure
+& $stage3Ctest --test-dir build/windows -C Debug --output-on-failure
 .\.venv\Scripts\python.exe tools/contracts/check-stage3-a.py
 .\.venv\Scripts\python.exe tools/contracts/test-stage3-a.py
 .\.venv\Scripts\python.exe tools/contracts/check-stage3-b.py

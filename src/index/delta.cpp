@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstring>
 #include <limits>
 
 namespace agent_io {
@@ -159,6 +160,31 @@ Result<Success> DeltaLayer::RestoreRecord(VectorId id, Sequence sequence,
         return *error;
     }
     return PublishPrefix(committed_ + 1);
+}
+
+Result<Success> DeltaLayer::RetirePrefix(std::uint32_t count) {
+    if (state_ != DeltaSegmentState::active) return Invalid("Delta segment is not active");
+    if (count > committed_) return Invalid("Cannot retire beyond the published prefix");
+    if (count == 0) return Success{};
+    const auto dimension = static_cast<std::size_t>(options_.dimension);
+    const auto remaining = static_cast<std::size_t>(reserved_ - count);
+    for (std::size_t index = 0; index < remaining; ++index) {
+        const auto source = index + count;
+        ids_[index] = ids_[source];
+        versions_[index] = versions_[source];
+        std::memmove(values_.data() + index * dimension, values_.data() + source * dimension,
+                     dimension * sizeof(float));
+    }
+    for (std::size_t index = remaining; index < reserved_; ++index) {
+        ids_[index] = 0;
+        versions_[index] = 0;
+    }
+    reserved_ -= count;
+    committed_ -= count;
+    // Pins captured against the previous segment id must stop matching: their
+    // slots no longer describe what is in the layer.
+    ++segment_id_;
+    return Success{};
 }
 
 void DeltaLayer::Reset() {

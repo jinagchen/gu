@@ -31,6 +31,10 @@ public:
                                             Sequence snapshot) = 0;
     virtual Result<std::optional<VersionDirectoryEntry>> FindId(SegmentId segment,
                                                                 VectorId id) = 0;
+    // Files this generation pins. A superseded generation may only be deleted
+    // once these are retired: the registry pins a native handle per file, and
+    // Windows refuses to unlink a file with an open handle.
+    virtual std::vector<FileId> SegmentFiles() const = 0;
 };
 
 // Read-only description used for run artifacts. Evaluates the same metadata

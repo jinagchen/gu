@@ -74,6 +74,13 @@ public:
     // contiguity, so no cancellation window is needed here.
     Result<Success> RestoreRecord(VectorId id, Sequence sequence, std::span<const float> values);
 
+    // Drops the first `count` published records after a checkpoint has made
+    // them durable in a segment. Records that arrived while the segment was
+    // being written stay, in order: a checkpoint must not swallow a write it
+    // did not include. The segment id moves on, so pins captured before the
+    // call are no longer readable -- their records are in the new segment.
+    Result<Success> RetirePrefix(std::uint32_t count);
+
     // Drop every record. Called after a checkpoint has made the delta durable
     // in a segment; the publication prefix must not depend on this layer again.
     void Reset();

@@ -28,17 +28,13 @@ MSVC C++20，`/W4 /WX /permissive- /EHsc`。Release 全部构建及 Debug 存储
 
 最终原始结果、日志和计量保存在 `runs/stage4-a-storage-final-20261112`，阶段二原始工件保持原样。证据记录本次最终实现、测试及检查脚本的源码哈希。
 
-先按 [README 的快速开始](../README.md#快速开始)配置 Release 和独立的 Debug 构建目录。使用阶段二引导脚本生成的构建目录时，将 `$debugBuild` 设为 `build/windows-stage2-debug`。集成检查仍使用阶段二的 Release DiskANN 探针。
-
 ```powershell
 $cmakeExe = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
 $ctestExe = Join-Path (Split-Path $cmakeExe) 'ctest.exe'
-$debugBuild = 'build/windows-debug'
 & $cmakeExe --build build/windows --config Release
-& $cmakeExe --build $debugBuild --config Debug --target synchronous_storage_test agent_io_contracts windows_environment_probe job_runner
+& $cmakeExe --build build/windows --config Debug --target synchronous_storage_test agent_io_contracts windows_environment_probe job_runner
 & $ctestExe --test-dir build/windows -C Release --output-on-failure
-& $ctestExe --test-dir $debugBuild -C Debug --output-on-failure `
-  -R '^(synchronous_storage|windows_environment_probe|job_process_tree|job_commit_rejection)$'
+& $ctestExe --test-dir build/windows -C Debug --output-on-failure
 .\.venv\Scripts\python.exe tools/storage/check-synchronous-storage.py `
   --fixture D:\agent-io-stage2\20261110 --output runs/stage4-a-storage-repeat
 ```

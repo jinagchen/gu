@@ -72,4 +72,15 @@ Result<RecoveryReport> ScanWalDirectory(const std::filesystem::path& wal_directo
                                         Sequence checkpoint_sequence,
                                         const WalOptions& options);
 
+// Removes WAL files whose header start sequence is at or below `up_to`.
+//
+// Callers must have published those records in a segment *and* rotated the
+// writer, so every eligible file is closed and holds nothing newer. A file that
+// cannot be removed -- a foreign instance, an unreadable header, a handle still
+// open -- is left in place and counted in `failed`: keeping a file costs disk,
+// deleting the wrong one costs data.
+Result<std::uint64_t> RecycleWalFiles(const std::filesystem::path& wal_directory,
+                                      const InstanceId& instance_id, Sequence up_to,
+                                      std::uint64_t* failed);
+
 }  // namespace agent_io

@@ -14,7 +14,8 @@ target_compile_features(agent_io_index_contracts PRIVATE cxx_std_20)
 add_library(agent_io_index STATIC
     src/index/json.cpp src/index/digest.cpp src/index/format.cpp
     src/index/manifest.cpp src/index/scratch.cpp src/index/adapter.cpp
-    src/index/builder.cpp src/index/delta.cpp src/index/recovery.cpp)
+    src/index/builder.cpp src/index/delta.cpp src/index/recovery.cpp
+    src/index/graph.cpp src/index/segment_writer.cpp src/index/publish.cpp)
 target_include_directories(agent_io_index PUBLIC include)
 target_compile_features(agent_io_index PUBLIC cxx_std_20)
 target_compile_definitions(agent_io_index PRIVATE
@@ -54,6 +55,8 @@ add_executable(index_engine_test tests/index/index-engine-test.cpp)
 target_link_libraries(index_engine_test PRIVATE agent_io_engine)
 
 add_executable(dynamic_engine_test tests/index/dynamic-engine-test.cpp)
+add_executable(maintenance_test tests/index/maintenance-test.cpp)
+target_link_libraries(maintenance_test PRIVATE agent_io_engine)
 target_link_libraries(dynamic_engine_test PRIVATE agent_io_engine)
 
 add_executable(write_probe tools/dynamic/write-probe.cpp)
@@ -85,7 +88,7 @@ if(MSVC)
     foreach(target agent_io_contracts agent_io_index_contracts
                    agent_io_storage agent_io_index agent_io_engine
                    agent_io_benchmark benchmark_runner_test index_engine_test
-                   dynamic_engine_test
+                   dynamic_engine_test maintenance_test
                    synchronous_storage_test wal_test vector_build write_probe
                    windows_environment_probe job_runner)
         target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc)
@@ -163,6 +166,8 @@ add_test(NAME index_engine COMMAND index_engine_test)
 set_tests_properties(index_engine PROPERTIES TIMEOUT 120)
 add_test(NAME dynamic_engine COMMAND dynamic_engine_test)
 set_tests_properties(dynamic_engine PROPERTIES TIMEOUT 180)
+add_test(NAME maintenance COMMAND maintenance_test)
+set_tests_properties(maintenance PROPERTIES TIMEOUT 300)
 if(TARGET vector_build AND EXISTS "${AGENT_IO_TEST_PYTHON}")
     # The refusal matrix: every rejected configuration must leave the published
     # index byte-identical, so this has to run against the real binaries.

@@ -1117,14 +1117,25 @@ void TestConcurrentQueriesAndWrites() {
     static_cast<void>(engine->Close());
 }
 
-void TestUnsupportedCheckpointIsExplicit() {
+// An empty delta has nothing to flush: the checkpoint must say so by keeping
+// the sequence it already had, not by inventing a new generation.
+void TestEmptyCheckpointIsANoop() {
     auto fixture = Prepare("checkpoint");
     auto engine = OpenFixture(fixture, Options());
     if (!engine) return;
+    const auto before = engine->Stats();
     const auto receipt = engine->Checkpoint(std::chrono::milliseconds(1000));
-    Require(std::holds_alternative<Error>(receipt) &&
-            std::get<Error>(receipt).code == ErrorCode::unsupported,
-            "checkpoint reports unsupported rather than pretending to flush");
+    Require(std::holds_alternative<CheckpointReceipt>(receipt),
+            "an empty checkpoint succeeds instead of failing");
+    if (std::holds_alternative<CheckpointReceipt>(receipt) &&
+        std::holds_alternative<EngineStats>(before)) {
+        const auto& value = std::get<CheckpointReceipt>(receipt);
+        const auto& stats = std::get<EngineStats>(before);
+        Require(value.checkpoint_sequence == stats.checkpoint_sequence,
+                "an empty checkpoint does not move the checkpoint sequence");
+        Require(value.target_sequence == stats.published_sequence,
+                "an empty checkpoint reports the sequence it saw");
+    }
     static_cast<void>(engine->Close());
 }
 
@@ -1262,7 +1273,7 @@ int main(int argc, char** argv) {
     TestScanToRepairRevalidation();
     TestRefusals();
     TestDeltaCapacityIsEnforced();
-    TestUnsupportedCheckpointIsExplicit();
+    TestEmptyCheckpointIsANoop();
     TestProcessCrashRecovery();
 
     std::printf("dynamic-engine: %d checks, %d failures\n", g_checks, g_failures);

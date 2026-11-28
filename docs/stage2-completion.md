@@ -20,13 +20,13 @@
 
 ## 2 构建与运行
 
-按 [README 的前置条件](../README.md#完整测试的前置条件)准备 Python 3.12、ASCII 路径和 LF 检出，再在仓库根目录的 PowerShell 中执行：
+在仓库根目录的 PowerShell 执行：
 
 ```powershell
 .\tools\environment\bootstrap-stage2.ps1
 ```
 
-脚本检查 NuGet SHA256、固定 DiskANN 提交和子模块并应用补丁。它先安装锁定的 Python 依赖，再配置并运行 Release 和 Debug 的全量 CTest。Release 探针使用 `build/windows`，Debug 回归使用独立的 `build/windows-stage2-debug`。小数据验证使用 Release 探针。首次下载依赖可能耗时。可用 `-DataDirectory` 指定有至少 40 GiB 空闲的 ASCII 路径。
+脚本检查 NuGet SHA256、固定 DiskANN 提交/子模块并应用已记录补丁，构建依赖和项目，运行 Release/Debug CTest、安装锁定的 Python 隔离依赖，再执行完整小数据验证。首次下载依赖可能耗时。可用 `-DataDirectory` 指定有至少 40 GiB 空闲的 ASCII 路径；DiskANN 0.6.1 的窄字符文件接口不能据此宣称支持中文数据路径。项目源码目录含中文已构建通过。
 
 已有构建时只重跑实验：
 
@@ -34,7 +34,7 @@
 .\.venv\Scripts\python.exe tools/environment/stage2.py
 ```
 
-本阶段的历史证据记录了当时的环境与 Job Object CTest，Release 和 Debug 各通过 3/3。当前全量回归覆盖的测试见 [README](../README.md#快速开始)。两套构建分别在其 `Testing/Temporary/LastTest.log` 保存最近一次 CTest 日志。
+环境与 Job Object CTest 在 Release、Debug 各为 3/3 通过。完整构建日志在 `build/stage2-bootstrap.log`；后一次 CTest 会覆盖同目录 `LastTest.log`，证据目录分别保存两种配置的输出。接口目标只验证声明，不生成 Engine 实现。
 
 ## 3 内存实测口径
 

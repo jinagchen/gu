@@ -343,6 +343,16 @@ public:
         return total;
     }
 
+    std::vector<FileId> SegmentFiles() const override {
+        std::vector<FileId> files;
+        files.reserve(segments_.size() * 2);
+        for (const auto& state : segments_) {
+            if (state.graph) files.push_back(state.graph->Id());
+            if (state.versions) files.push_back(state.versions->Id());
+        }
+        return files;
+    }
+
 private:
     const SegmentState* FindSegment(SegmentId id) const {
         for (const auto& state : segments_)

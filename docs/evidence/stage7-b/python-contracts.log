@@ -1,0 +1,17 @@
+== tools/contracts/check-stage3-b.py
+PASS: build config, dynamic config, trace contract (10 writes + 6 queries of 16 rows), exact answers (Recall@10=1.00), 30 rejected negative cases
+== tools/contracts/test-stage3-b.py
+----------------------------------------------------------------------
+Ran 87 tests in 40.681s
+
+OK
+== tools/contracts/test-stage3-freeze.py
+----------------------------------------------------------------------
+Ran 22 tests in 0.006s
+
+OK
+== tools/storage/test-verify-read-path.py
+----------------------------------------------------------------------
+Ran 6 tests in 3.244s
+
+OK

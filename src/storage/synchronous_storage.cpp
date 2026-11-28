@@ -271,11 +271,17 @@ public:
         return Success{};
     }
     Result<Success> CollectRetired() override {
+        // A retired entry is only dropped once nothing pins the file any more:
+        // the caller owns the path, so releasing the entry is what makes the
+        // native handle go away and the directory deletable. Entries that a
+        // live lease still pins stay registered and are collected on a later
+        // call, which is why this returns Success instead of failing.
         std::lock_guard lock(mutex_);
-        for (const auto& [key, entry] : entries_) {
-            if (entry.retired && entry.retired_file.expired())
-                return Error{ErrorCode::unsupported,
-                    "Automatic deletion disabled pending recovery acceptance"};
+        for (auto item = entries_.begin(); item != entries_.end();) {
+            if (item->second.retired && item->second.retired_file.expired())
+                item = entries_.erase(item);
+            else
+                ++item;
         }
         return Success{};
     }
