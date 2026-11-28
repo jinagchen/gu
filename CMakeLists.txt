@@ -99,6 +99,8 @@ endif()
 # storage and runner builds remain independent of this CLI-only JSON library.
 set(AGENT_IO_TEST_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe"
     CACHE FILEPATH "Python for native producer and contract integration tests")
+set(AGENT_IO_AGENT_TEST_PYTHON "" CACHE FILEPATH
+    "Optional Python with the LangChain adapter dependencies installed")
 find_path(AGENT_IO_BOOST_INCLUDE boost/json/src.hpp HINTS
     "${AGENT_IO_DISKANN_PACKAGES}/boost/lib/native/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/build/diskann/packages/boost/lib/native/include")
@@ -112,6 +114,8 @@ if(AGENT_IO_BOOST_INCLUDE)
         tools/benchmark/engine-target.cpp)
     target_link_libraries(vector_bench PRIVATE agent_io_engine)
     target_link_libraries(vector_bench PRIVATE agent_io_benchmark agent_io_benchmark_json)
+    add_executable(vector_tool tools/agent/vector-tool.cpp)
+    target_link_libraries(vector_tool PRIVATE agent_io_engine agent_io_benchmark_json)
     target_compile_definitions(vector_bench PRIVATE
         WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
         AGENT_IO_BUILD_CONFIG="$<CONFIG>")
@@ -138,9 +142,10 @@ if(AGENT_IO_BOOST_INCLUDE)
         AGENT_IO_BUILD_DIRTY="${AGENT_IO_DIRTY_VALUE}")
     if(MSVC)
         target_compile_options(vector_bench PRIVATE /W4 /WX /permissive- /EHsc)
+        target_compile_options(vector_tool PRIVATE /W4 /WX /permissive- /EHsc)
     endif()
 else()
-    message(STATUS "vector_bench CLI disabled: set AGENT_IO_BOOST_INCLUDE to pinned Boost 1.78")
+    message(STATUS "vector_bench and vector_tool disabled: set AGENT_IO_BOOST_INCLUDE to pinned Boost 1.78")
 endif()
 
 enable_testing()
