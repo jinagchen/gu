@@ -150,6 +150,10 @@ endif()
 
 enable_testing()
 if(EXISTS "${AGENT_IO_TEST_PYTHON}")
+    add_test(NAME stage3_a_contracts COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/check-stage3-a.py")
+    add_test(NAME stage3_a_regressions COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/test-stage3-a.py")
     add_test(NAME stage3_b_contracts COMMAND "${AGENT_IO_TEST_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/check-stage3-b.py")
     add_test(NAME stage3_b_regressions COMMAND "${AGENT_IO_TEST_PYTHON}"
@@ -158,8 +162,9 @@ if(EXISTS "${AGENT_IO_TEST_PYTHON}")
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/contracts/test-stage3-freeze.py")
     add_test(NAME stage5_read_path_checks COMMAND "${AGENT_IO_TEST_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/storage/test-verify-read-path.py")
-    set_tests_properties(stage3_b_contracts stage3_b_regressions stage3_manifest_contract
-        stage5_read_path_checks PROPERTIES TIMEOUT 60)
+    set_tests_properties(stage3_a_contracts stage3_a_regressions stage3_b_contracts
+        stage3_b_regressions stage3_manifest_contract stage5_read_path_checks
+        PROPERTIES TIMEOUT 60)
 endif()
 add_test(NAME benchmark_runner COMMAND benchmark_runner_test)
 set_tests_properties(benchmark_runner PROPERTIES TIMEOUT 30)
@@ -169,6 +174,19 @@ if(TARGET vector_bench AND EXISTS "${AGENT_IO_TEST_PYTHON}")
         --binary $<TARGET_FILE:vector_bench> --job-runner $<TARGET_FILE:job_runner>
         --output-parent "${CMAKE_CURRENT_BINARY_DIR}/benchmark-cli-$<CONFIG>")
     set_tests_properties(benchmark_cli PROPERTIES TIMEOUT 60)
+    add_test(NAME benchmark_mixed COMMAND "${AGENT_IO_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/benchmark/check-mixed.py"
+        --binary $<TARGET_FILE:vector_bench> --build $<TARGET_FILE:vector_build>
+        --job-runner $<TARGET_FILE:job_runner>
+        --output-parent "${CMAKE_CURRENT_BINARY_DIR}/benchmark-mixed-$<CONFIG>")
+    set_tests_properties(benchmark_mixed PROPERTIES TIMEOUT 120)
+endif()
+if(TARGET vector_tool AND EXISTS "${AGENT_IO_AGENT_TEST_PYTHON}")
+    add_test(NAME langchain_adapter COMMAND "${AGENT_IO_AGENT_TEST_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/agent/check-langchain.py"
+        --binary $<TARGET_FILE:vector_tool> --build $<TARGET_FILE:vector_build>
+        --output-parent "${CMAKE_CURRENT_BINARY_DIR}/langchain-adapter-$<CONFIG>")
+    set_tests_properties(langchain_adapter PROPERTIES TIMEOUT 120)
 endif()
 add_test(NAME index_engine COMMAND index_engine_test)
 set_tests_properties(index_engine PROPERTIES TIMEOUT 120)

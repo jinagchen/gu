@@ -954,8 +954,6 @@ def _evaluate(run_dir):
             result["notes"].append(
                 "Raw Job high-water mark exceeds the limit; retain the original evidence "
                 "and investigate rejected allocations before resource acceptance.")
-        (run_dir / "evaluation.json").write_text(
-            json.dumps(result, indent=2) + "\n", encoding="utf-8", newline="\n")
         return result
 
     prefixes, updates, sequences = replay_prefixes(base, write_rows, snapshots)
@@ -1048,18 +1046,20 @@ def _evaluate(run_dir):
             "Protocol completeness is not evidence that the 0.85 recall target was reached.",
         ],
     }
-    (run_dir / "evaluation.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     return result
 
 
-def evaluate(run_dir):
+def evaluate(run_dir, *, write_report=True):
     run_dir = Path(run_dir).resolve()
-    report = artifact_path(run_dir, "evaluation.json")
+    report = artifact_path(run_dir, "evaluation.json") if write_report else None
     try:
-        return _evaluate(run_dir)
+        result = _evaluate(run_dir)
+        if report is not None:
+            report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                              encoding="utf-8", newline="\n")
+        return result
     except (ContractError, OSError, ValueError, KeyError, TypeError) as error:
-        if run_dir.is_dir():
+        if report is not None and run_dir.is_dir():
             report.write_text(json.dumps({"verdict": "invalid", "diagnostic": str(error)}) + "\n",
                               encoding="utf-8", newline="\n")
         raise

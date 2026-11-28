@@ -521,7 +521,7 @@ def main():
     mix = validate_trace_contract(dynamic, dynamic_path)
 
     config = check.load_config(FIXTURE)
-    result = check.evaluate(FIXTURE)
+    result = check.evaluate(FIXTURE, write_report=False)
     require(result["verdict"] == "pass", "Fixture did not pass")
     require(result["checks"]["independent_answer_join"] == "pass",
             "Fixture answers were not cross-checked")
