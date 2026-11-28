@@ -128,4 +128,4 @@ environment.json 须记录 job_limit_commit_bytes、sample_interval_ms、测量�
 .\.venv\Scripts\python.exe tools/contracts/test-stage3-a.py
 ```
 
-校验器检查固定配置及示例的类型、字段、顺序、守恒、序号关联和模式预算；负例验证协议矛盾会被拒绝。它不是测量入口。真实静态测量使用 `vector_bench --target engine`，独立验证使用 `evaluation.check`。读优化的附加诊断进入 `summary.json`，不改变 `counters.json` 的字段；动态写入字段仍只有协议样例，没有真实 C++ 动态运行数据。[评测协议](evaluation-protocol.md)
+校验器检查固定配置及示例的类型、字段、顺序、守恒、序号关联和模式预算。`vector_bench --target engine` 支持静态和固定轨迹混合测量，独立验证使用 `evaluation.check`。混合轮次另输出 `receipts.jsonl`，与 `writes.jsonl` 中状态为 `ok` 的写入按操作 ID 和确认序号对应。读优化的附加诊断进入 `summary.json`。[评测协议](evaluation-protocol.md)

@@ -2,7 +2,7 @@
 
 契约版本 API-1.2，日期 2026 年 11 月 11 日，对应 DESIGN-1.1 [总体设计](architecture.md)。1.1 确定 Windows IOCP；1.2 补充第三阶段 A 的 BlockReader、文件回收、预算模式、读取调度、WAL 编码与基准交接。接口是项目内部源代码契约，不承诺跨编译器 ABI 稳定。
 
-截至 2026 年 11 月 23 日，`Engine` 可链接并支持静态 `Open`、`Search`、`Get`、`Stats`、`QuiesceReads` 和 `Close`。`Open` 独占 `LOCK` 并校验索引，不做 WAL 重放；`Insert`、`Upsert`、`Checkpoint` 固定返回 `unsupported`。下文的动态语义是冻结契约，不是已交付行为。[项目状态](project-status.md)
+截至 2026 年 11 月 28 日，`Engine` 已接通静态检索、动态写入、检查点及后台整理。`Open` 持有独占 `LOCK`，校验索引并恢复 WAL。已验范围及规模限制见[项目状态](project-status.md)。
 
 ## 1 类型和返回值
 
@@ -47,9 +47,9 @@ Get 返回的 `version` 是该向量最后修改序号，`snapshot_sequence` 是
 
 ## 3 参数和预算
 
-MemoryBudget 各分区均以字节指定，总和必须等于 total_bytes；total_bytes=0 或缺必需分区不能通过 Open。分区涵盖缓存、增量、元数据、工作区和安全余量，具体用途见总体设计。
+MemoryBudget 各分区均以字节指定，总和必须等于 total_bytes。`total_bytes=0` 或缺必需分区不能通过 Open。`cache_bytes` 包含数据块、对齐余量、缓冲和 CLOCK 项的预约。实际数据驻留见 `cache_resident_bytes`。
 
-API-1.2 新增 rebuild_memory（缺省 null）、ResourceLimits、ReadScheduling、WalOptions。查询/重建模式保持相同总限额；未配置 rebuild_memory 时不运行构建新段的维护。各阈值、最小工作集、切换失败与退回路径按 [A 侧契约第 3 节](stage3-a-contract.md)执行；正式分配与大规模可行性仍待实现验证。
+API-1.2 新增 rebuild_memory（缺省 null）、ResourceLimits、ReadScheduling、WalOptions。查询和重建模式声明相同总限额。`rebuild_memory` 启用后台任务，缺省时仍可在查询预算内手动调用 `Checkpoint`。应在正式规模复核模式切换与新旧代次并存的峰值。预算定义见 [A 侧契约第 3 节](stage3-a-contract.md)。
 
 `block_bytes=4096` 是配置初值，不是平台对齐保证。direct_reads 在 Windows 映射为 FILE_FLAG_NO_BUFFERING；后端探测逻辑/物理扇区并检查地址、偏移和长度。无法满足时返回 unsupported 或 invalid_argument，调用方显式改配置后才允许 buffered 路线。io_backend 可取 synchronous 或 windows_iocp。
 
@@ -60,7 +60,7 @@ API-1.2 新增 rebuild_memory（缺省 null）、ResourceLimits、ReadScheduling
 | max_inflight_reads | >0；所有优先级总上限 |
 | max_prefetch_reads | ≤ 总在途量，必须为需求读和后台推进保留额度；为 0 时关闭推测 |
 | max_delta_segments | >0；包括可见及仍被旧查询固定的增量段资源，具体内存与磁盘段分别统计 |
-| group_commit_window | 非负；0 为不人为等待成组，仍须持久化后确认 |
+| group_commit_window | 保留的组提交参数。当前 Engine 逐条追加并同步，配置此字段不会改变确认节奏 |
 | k | >0；结果工作区必须能容纳，超配置能力明确报错 |
 | candidate_limit | ≥k；跨所有磁盘段的总候选上限，初版增量扫描另计行数和预算 |
 | prefetch_blocks | 每查询允许推测的在途块数，不能超过全局或内存上限 |
@@ -76,6 +76,8 @@ API-1.2 新增 rebuild_memory（缺省 null）、ResourceLimits、ReadScheduling
 Ready 状态支持多个线程并发 Search/Get/Insert/Upsert/Stats。Checkpoint 同一时间最多一个执行中的请求，可合并目标或返回 resource_exhausted；不能启动多个无界后台全量构建。
 
 Close 可以与普通调用重叠，但同一时间只由一个线程执行 Close；先停止新准入，再等已准入调用和 I/O 完成。析构与任何成员调用不得并发，对象生命周期由调用方负责。
+
+查询和写入等待视图锁时使用调用的原始截止时间。独占等待者进入视图锁准入后，后续查询要等该等待者取得锁。写入在此阶段到期返回 `deadline_exceeded`，无已尝试的 WAL 序号。
 
 耗时操作不持有 publication_mutex。公开接口不会在用户回调中执行引擎逻辑，因为初版公开 API 不提供回调；内部读取完成回调另按下节限制。
 
@@ -97,7 +99,9 @@ ReadRequest 持有 FileLease 和 BufferLease，校验 `block.file_id == file.Id(
 | WalWriter::Sync | 同步所有此前追加的数据并返回状态；组提交由上层控制 |
 | WalWriter::Rotate / Close | 组边界同步后轮换、关闭；错误后禁止通过轮换绕过恢复 |
 
-`BlockReader::ReadBatch` 返回按输入排序的只读块租约，`TryPrefetch` 非阻塞准入；文件引用与存储资源按 [A 侧契约](stage3-a-contract.md)管理。静态 `IndexAdapter`、`ScratchRequest` 计量和 Manifest 编解码已经实现。`DeltaStore`、`DeltaPin`、写入发布与跨代次回收按冻结的 [INDEX-B-1.2](stage3-b-contract.md) 实现和验收，尚无动态端到端运行。
+`BlockReader::ReadBatch` 返回按输入排序的只读块租约，`TryPrefetch` 非阻塞准入。文件引用与存储资源按 [A 侧契约](stage3-a-contract.md)管理。真实动态混合基准已覆盖写入发布、快照读取及检查点和合并。查询按捕获时的 `live_count` 确定成功所需条数，候选不足返回 `search_incomplete`。
+
+`EngineStats` 报告后台读提交数及在途峰值、维护失败次数和最近错误、按最小额度跳过合并数、成功预约的维护工作区峰值及待删除段数。工作区峰值按保守估算计入 governor 的 workspace 区，实际进程峰值和代次共存成本另行测量。暂存前还会检查目标卷可用空间和配置的剩余空间下限。
 
 INDEX-B-1.1 的复审补充：ReadView/DeltaPin 为非所有权元数据，读取方法接收 ReadViewLease，由预先准备的生命周期对象固定段、增量和预算；未发布的最后预留槽可在 WAL 追加前 CancelLastSlot。Expand 显式接收 K，Refine 通过 RefinementRequest 接收租约、预算与同一查询期限；工作区包括两份重叠候选数组和导航上界。以上仅为声明，不是生命周期或并发实现验收。
 

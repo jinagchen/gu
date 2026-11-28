@@ -26,7 +26,9 @@
 .\tools\environment\bootstrap-stage2.ps1
 ```
 
-脚本检查 NuGet SHA256、固定 DiskANN 提交/子模块并应用已记录补丁，构建依赖和项目，运行 Release/Debug CTest、安装锁定的 Python 隔离依赖，再执行完整小数据验证。首次下载依赖可能耗时。可用 `-DataDirectory` 指定有至少 40 GiB 空闲的 ASCII 路径；DiskANN 0.6.1 的窄字符文件接口不能据此宣称支持中文数据路径。项目源码目录含中文已构建通过。
+脚本检查 NuGet SHA256、固定 DiskANN 提交和子模块并应用已记录补丁。构建依赖并安装锁定的 Python 3.12 隔离依赖后，配置和构建项目，运行 Release、Debug CTest 和小数据探针。首次下载依赖可能耗时。可用 `-DataDirectory` 指定有至少 40 GiB 空闲的 ASCII 路径。DiskANN 0.6.1 的窄字符文件接口要求数据路径为 ASCII。项目源码目录含中文已构建通过。
+
+2026 年 11 月 28 日在 ASCII/LF 检出中复跑完整引导。从空项目依赖目录和新 Python 环境开始，使用本机代理访问依赖源。Release 和 Debug 各通过 18 项 CTest，两次 DiskANN 探针 Recall@10 均为 1.000。日志和测量摘要分别位于 `D:/agent-io-stages-1-7-clean-163548066/bootstrap.log` 与 `D:/agent-io-stages-1-7-clean-163548066/data/summary.json`。
 
 已有构建时只重跑实验：
 

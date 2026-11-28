@@ -20,6 +20,7 @@
 | Intel OpenMP devel / redist win | 2022.0.3.3747 | Intel Simplified Software License，August 2021；两个包根目录各自的 `license.txt` |
 | NumPy | 2.2.6 | 安装包 `numpy-2.2.6.dist-info/LICENSE.txt`，含其捆绑组件声明 |
 | Matplotlib | 3.10.3 | 安装包 `matplotlib-3.10.3.dist-info/LICENSE` 及随附声明 |
+| LangChain Core（可选 Agent 示例） | 1.8.5，传递依赖锁定于 [Agent 示例依赖](../tools/agent/requirements.txt) | MIT，安装包 `langchain_core-1.8.5.dist-info/licenses/LICENSE` |
 
 Python 其余包已全部固定版本；原始 wheel 和安装包中的许可证及捆绑组件声明应随正式发布包一并审查、保留，阶段二不宣称已完成最终分发审查。MSVC、Windows SDK 使用本机既有安装，不纳入项目源码或二进制分发。
 
@@ -31,3 +32,5 @@ Python 其余包已全部固定版本；原始 wheel 和安装包中的许可证
 上述补丁没有修改上游图构建、邻居选择和搜索算法。当前 `vector_build` 和静态 Engine 实际使用项目自有 FORMAT-1 图及存储后端，不链接 DiskANN、MKL 或 OpenMP；固定上游及其运行库用于可选的 `diskann_probe` 和阶段二验证。`vector_bench` 单独复用 Boost 1.78 的 Boost.JSON 头文件；Python 依赖在离线评测中使用。WAL、CLOCK 与 IOCP 实现不新增第三方包。[当前实现与复现](project-status.md)
 
 首次运行脚本需要从 GitHub、NuGet 和 Python 包源下载。离线使用时，预先保留已锁定的源码及子模块、`build/diskann/packages`、NuGet 工具和 Python wheel 缓存，按锁定版本安装；仅保留可执行文件不足以重建。阶段二验证了联网构建流程，尚未演练完全断网重建。
+
+2026 年 11 月 28 日的清单修订使用 Codex 辅助修改引擎、补回归和整理文档。发布候选需汇总团队其他批次的使用记录及最终分发包内的许可证。

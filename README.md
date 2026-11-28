@@ -8,7 +8,7 @@
 | 赛题编号 | proj47 |
 | 赛题名称 | 面向 Agent 记忆的向量检索系统 I/O 优化 |
 
-技术路线为 C++20 核心加 Python 评测，当前平台为原生 Windows x64。**截至 2026 年 11 月 23 日，静态检索和读优化可运行，WAL 底层已交付，但 Engine 仍不能插入、更新或重放日志。** [项目状态与下一步](docs/project-status.md)集中记录能力、验证结果和验收缺口。
+技术路线为 C++20 核心加 Python 评测，当前平台为原生 Windows x64。Engine 支持静态检索、插入、更新、WAL 恢复、检查点和后台合并。真实 Engine 混合基准可运行 95:5 和 80:20 小矩阵。复测结果及规模、性能与设备试验的待验项见[前七阶段问题清单](docs/stages-1-7-issue-register.md)及[项目状态](docs/project-status.md)。
 
 华北区域赛**报名截止：2026 年 12 月 6 日**；**初赛作品提交截止：2026 年 12 月 11 日 23:59**（希冀赛题窗口）。准备完整工程、设计实现文档、过程资料、进展汇报幻灯片和仓库内解说视频；用队伍账号核对报名状态、提交入口和回执。[赛程与提交清单](docs/open-questions.md#已核实的赛程与提交信息)
 
@@ -49,7 +49,7 @@ Copyright 2026 proj47-RecallFlow contributors.
 - [第六阶段 A：WAL 底层](docs/stage6-a-wal.md)：FORMAT-1 编解码、顺序追加、刷盘、轮换和故障验证。
 - [第六阶段 B：动态闭环](docs/stage6-b-completion.md)：序号分配、增量层发布、查询融合与 WAL 重放；确认与可见延迟、恢复耗时和写放大的实测。
 - [第七阶段 A：固定后台读配额](docs/stage7-a-read-scheduling.md)：后台读按预留槽调度，可独立于合并任务启用。
-- [第七阶段 B：检查点、合并与回收](docs/stage7-b-completion.md)：增量落段、清单代次切换、后台合并、旧段目录回收，维护策略的四臂消融与定速负载（声明 200 写/秒，上限 200–400 写/秒）。
+- [第七阶段 B：检查点、合并与回收](docs/stage7-b-completion.md)：增量落段、清单代次切换、后台合并、旧段目录回收，以及交付批次的维护消融和短时定速负载。
 
 公开声明位于 [engine.hpp](include/agent_io/engine.hpp)、[storage.hpp](include/agent_io/storage.hpp) 和 [index.hpp](include/agent_io/index.hpp)。Engine 已按声明实现静态查询、动态写入、恢复、检查点与后台整理；同步存储已有独立实现。协议示例放在 configs/examples 和 evaluation/examples；阶段二小数据实测另见[验收记录](docs/stage2-completion.md)，不与协议示例混用。
 
@@ -83,7 +83,7 @@ include/agent_io/     核心公开接口
 src/storage/          同步与 Windows IOCP 读取、块缓存、预取和 WAL
 src/index/            清单与版本目录、首建与图适配
 src/engine/           静态查询引擎（写路径返回 unsupported）
-src/benchmark/        静态开放式并发基准运行器
+src/benchmark/        静态及固定轨迹混合并发基准运行器
 tools/                环境探针、基准与首建 CLI、契约自检与基线驱动
 tests/                静态检索、并发读和 WAL 底层故障测试
 evaluation/           Python 数据处理、实验编排和结果分析
@@ -100,7 +100,7 @@ docs/                 设计、实验方法和相关工作
 3. 已将 `IndexAdapter`、`vector_build` 和静态 `Engine` 接入 `vector_bench`，Python 独立计算 Recall@10，并复核内存与重复运行证据。
 4. 已完成第五阶段 A 的静态读路径对照，记录缓存、IOCP 与预取对读取量、延迟及资源的影响；B 已独立复核并补测缓存/工作集连续谱，见[第五阶段 B 交付](docs/stage5-b-completion.md)。
 5. 第六阶段已实现 WAL 底层与引擎动态闭环：确认后可见、重启可恢复、旧版本不冒充当前，见[第六阶段 B 交付](docs/stage6-b-completion.md)。
-6. 第七阶段已实现整理闭环：增量落段、清单代次切换、后台合并与旧段目录回收，`Checkpoint` 不再是占位；策略对照与定速负载见[第七阶段 B 交付](docs/stage7-b-completion.md)。定速实测给出 200 写/秒的下限，并暴露读并发会吃掉写入（90–119 写/秒）；P99、多写线程与 EVAL-1.1 动态轨迹仍待后续。
+6. 第七阶段实现增量落段、清单代次切换、后台合并与旧段目录回收。历史批次的短时定速结果见[第七阶段 B 交付](docs/stage7-b-completion.md)。本轮补充发布失败重试、满段恢复、维护预算和回收回归。持续多写者与 P99 仍待正式实验。
 
 动态评测使用对应数据版本的真实答案；正式实验矩阵属于第八阶段。
 
@@ -125,11 +125,11 @@ ctest --test-dir build/windows -C Release -V
 
 如 `vector_bench` 未生成，配置时设置 `AGENT_IO_BOOST_INCLUDE` 指向固定 Boost 的 `include` 目录。完整 CTest 还需要 `AGENT_IO_TEST_PYTHON` 指向已安装锁定依赖的解释器；默认是仓库 `.venv/Scripts/python.exe`。普通终端找不到 `cmake` 时，使用[随附工具路径](docs/stage2-completion.md#61-独立环境探针)。
 
-阶段七的整理路径由 `maintenance_test` 覆盖（检查点、合并、代次切换、回收与策略消融，约 9 秒）：
+以下命令运行维护回归及混合基准。`benchmark_mixed` 在 Windows Job 下首建小索引并运行固定轨迹，将写入收据、实际查询快照和 Python 独立验算保存到 `build/windows/benchmark-mixed-Release/`。
 
 ```powershell
-cmake --build build/windows --config Release --target maintenance_test
-ctest --test-dir build/windows -C Release -R '^maintenance$' --output-on-failure
+cmake --build build/windows --config Release
+ctest --test-dir build/windows -C Release -R '^(maintenance|dynamic_engine|benchmark_mixed)$' -V
 ```
 
 Python 侧校验命令（使用 `.venv` 中的解释器）：
@@ -147,6 +147,21 @@ Python 侧校验命令（使用 `.venv` 中的解释器）：
 前两条检查配置、协议反例和动态评测回归。中间三条默认使用 `build/windows/Release` 的基准程序，输出须使用新目录（静态基线允许空目录）。`run-static-baseline.py` 在 Job 限额内完成首建、测量与离线评测；`run-stage5.py` 做五种读模式、两种缓存预算的对照；`run-stage5-b.py` 在一个装不下缓存的较大图上扫缓存与预取窗口；`verify-read-path.py` 校验 `summary.json` 的读路径统计，可对任意运行目录重复执行；`run-stage6-b.py` 逐档写入量测量确认与可见延迟、恢复耗时，并校验 WAL 字节数等于写次数乘单帧大小。单独运行 `evaluation.check` 会重写目标目录的 `evaluation.json`；复查受版本控制的示例时请先复制到临时目录。退出 0 只表示工件完整且已计分，是否达标另查 `verdict`；退出 1 为无效，2 为不计召回的 `incomplete` 或 `requires_review`。
 
 完整阶段二验证使用 `.\tools\environment\bootstrap-stage2.ps1`，包括固定依赖、Release/Debug 检查、Python 隔离依赖、小数据查询、故障注入及新旧索引共存资源演练。默认数据目录为 `D:\agent-io-stage2\20261110`。依赖与许可证见[第三方记录](docs/third-party.md)，结果、容量估算和限制见[阶段二验收](docs/stage2-completion.md)。
+
+### LangChain 本机适配
+
+`vector_tool` 将 `search`、`insert`、`upsert` 接到同一 Engine，适配器通过 LangChain 的 `StructuredTool` 提供三个工具。每次调用单独打开索引，返回结果或结构化错误。下面的检查创建独立的小索引，验证跨进程可见性、重复插入和无效查询。
+
+```powershell
+.\.venv\Scripts\python.exe -m venv build/agent-demo-venv
+$agentPython = 'build/agent-demo-venv/Scripts/python.exe'
+& $agentPython -m pip install -r tools/agent/requirements.txt
+cmake --build build/windows --config Release --target vector_tool vector_build
+& $agentPython tools/agent/check-langchain.py --binary build/windows/Release/vector_tool.exe `
+  --build build/windows/Release/vector_build.exe --output-parent D:/agent-io-demo
+```
+
+应用从 [适配器](tools/agent/langchain_adapter.py) 调用 `create_tools(binary, index)`，传入构建产物和已有索引目录。调用会锁定索引，用于本机单实例演示。设置 `AGENT_IO_AGENT_TEST_PYTHON` 为该虚拟环境解释器的绝对路径可将 `langchain_adapter` 加入 CTest。
 
 完整架构、内存预算、实验矩阵和排期见同目录参赛技术方案。
 
