@@ -235,7 +235,7 @@ std::uint64_t JobCommitLimit() {
 }
 
 void WriteReport(const std::filesystem::path& path, const BuildConfig& config,
-                 const BuildOutcome& outcome) {
+                 const BuildOutcome& outcome, const std::string& adapter_name) {
     Value report = Value::Object();
     report.Insert("build_id", Value::String(config.build_id));
     report.Insert("purpose", Value::String(config.purpose));
@@ -250,7 +250,7 @@ void WriteReport(const std::filesystem::path& path, const BuildConfig& config,
                   Value::String(FormatDigest(outcome.artifacts.version_directory_sha256)));
     report.Insert("segment_file", Value::String(outcome.artifacts.segment_file.string()));
     report.Insert("manifest_file", Value::String(outcome.artifacts.manifest_file.string()));
-    report.Insert("adapter", Value::String("agent_io_native_graph"));
+    report.Insert("adapter", Value::String(adapter_name));
     const auto text = index_json::Write(report);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output << text << '\n';
@@ -319,15 +319,16 @@ int Run(int argc, wchar_t** argv) {
                      static_cast<unsigned long long>(built.peak_commit_bytes),
                      static_cast<unsigned long long>(config.max_peak_commit_bytes),
                      built.published ? "true" : "false");
-        if (report_seen) WriteReport(report_path, config, built);
+        if (report_seen) WriteReport(report_path, config, built, request.adapter_name);
         return 4;
     }
-    if (report_seen) WriteReport(report_path, config, built);
-    std::printf("published=%s nodes=%llu bytes=%llu peak_commit=%llu adapter=agent_io_native_graph\n",
+    if (report_seen) WriteReport(report_path, config, built, request.adapter_name);
+    std::printf("published=%s nodes=%llu bytes=%llu peak_commit=%llu adapter=%s\n",
                 built.published ? "true" : "false",
                 static_cast<unsigned long long>(built.artifacts.node_count),
                 static_cast<unsigned long long>(built.artifacts.file_bytes),
-                static_cast<unsigned long long>(built.peak_commit_bytes));
+                static_cast<unsigned long long>(built.peak_commit_bytes),
+                request.adapter_name.c_str());
     return 0;
 }
 

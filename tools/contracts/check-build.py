@@ -351,6 +351,8 @@ def main(argv=None):
         "the report graph digest differs from the published file")
     require(report["native_version"] == config["native"]["native_version"],
             "the report must name the native dependency version")
+    require(report["adapter"] == manifest["adapter"]["name"],
+            "the report adapter must match the published manifest")
     require(not (good / "index.staging").exists(), "staging must not survive a publish")
     cases["valid-build"] = {"exit_code": code, "kernel_peak_job_commit_bytes": peak,
                             "elapsed_ms": record.get("elapsed_ms")}
