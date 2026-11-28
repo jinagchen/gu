@@ -67,7 +67,7 @@ Result<SegmentArtifact> WriteSegment(const SegmentWriteRequest& request) {
 
     auto adjacency = BuildAdjacency(flat, count, request.dimension, request.layout.max_degree);
     if (const auto* error = std::get_if<Error>(&adjacency)) return *error;
-    const auto& edges = std::get<std::vector<std::vector<GraphEdge>>>(adjacency);
+    const auto& edges = std::get<GraphAdjacency>(adjacency);
 
     std::error_code path_error;
     std::filesystem::create_directories(request.staging_directory, path_error);
@@ -75,23 +75,14 @@ Result<SegmentArtifact> WriteSegment(const SegmentWriteRequest& request) {
         return Failure(ErrorCode::io_error, "Cannot create the segment staging directory",
                        static_cast<int>(path_error.value()));
 
-    std::vector<std::byte> row(static_cast<std::size_t>(request.layout.row_bytes) * count);
-    for (std::uint64_t node = 0; node < count; ++node) {
-        NodeRow record;
-        record.id = request.records[static_cast<std::size_t>(node)].id;
-        record.version = request.records[static_cast<std::size_t>(node)].version;
-        for (const auto& edge : edges[static_cast<std::size_t>(node)])
-            record.neighbors.push_back(edge.node);
-        const auto encoded = EncodeNodeRow(
-            record, std::span<const float>(flat.data() + node * request.dimension,
-                                           request.dimension),
-            request.layout, std::span<std::byte>(row.data() + node * request.layout.row_bytes,
-                                                 request.layout.row_bytes));
-        if (const auto* error = std::get_if<Error>(&encoded)) return *error;
-    }
     const auto graph_path = request.staging_directory / "graph.bin";
-    if (!WriteWhole(graph_path, row))
-        return Failure(ErrorCode::io_error, "Cannot write the graph segment");
+    const auto written = WriteGraphRows(graph_path, request.layout, flat, edges,
+        [&request](std::size_t node) {
+            const auto& record = request.records[node];
+            return std::pair{record.id, record.version};
+        });
+    if (const auto* error = std::get_if<Error>(&written)) return *error;
+    const auto graph_bytes = std::get<std::uint64_t>(written);
     if (!FlushPath(graph_path))
         return Failure(ErrorCode::io_error, "Cannot flush the graph segment",
                        static_cast<int>(GetLastError()));
@@ -145,7 +136,7 @@ Result<SegmentArtifact> WriteSegment(const SegmentWriteRequest& request) {
     metadata.parameters = request.parameters;
     metadata.version_directory_file = "versions.bin";
     metadata.version_entry_count = count;
-    metadata.files.push_back(SegmentFileRecord{"graph.bin", row.size(), row.size(),
+    metadata.files.push_back(SegmentFileRecord{"graph.bin", graph_bytes, graph_bytes,
                                                std::get<Digest>(graph_digest)});
     metadata.files.push_back(SegmentFileRecord{"versions.bin", version_logical, version_physical,
                                                std::get<Digest>(versions_digest)});
@@ -167,14 +158,14 @@ Result<SegmentArtifact> WriteSegment(const SegmentWriteRequest& request) {
     SegmentArtifact artifact;
     artifact.uuid = metadata.uuid;
     artifact.node_count = count;
-    artifact.graph_bytes = row.size();
+    artifact.graph_bytes = graph_bytes;
     artifact.graph_sha256 = std::get<Digest>(graph_digest);
     artifact.version_logical_bytes = version_logical;
     artifact.version_physical_bytes = version_physical;
     artifact.version_sha256 = std::get<Digest>(versions_digest);
     artifact.metadata_bytes = encoded_metadata.size();
     artifact.metadata_sha256 = std::get<Digest>(metadata_digest);
-    artifact.staged_bytes = row.size() + version_physical + encoded_metadata.size();
+    artifact.staged_bytes = graph_bytes + version_physical + encoded_metadata.size();
     return artifact;
 }
 

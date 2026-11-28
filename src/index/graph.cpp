@@ -1,6 +1,8 @@
 #include "graph.hpp"
+#include "format.hpp"
 
 #include <algorithm>
+#include <fstream>
 
 namespace agent_io {
 namespace {
@@ -16,13 +18,14 @@ double SquaredL2(const float* left, const float* right, std::uint32_t dimension)
 
 }  // namespace
 
-Result<std::vector<std::vector<GraphEdge>>> BuildAdjacency(
+Result<GraphAdjacency> BuildAdjacency(
     std::span<const float> vectors, std::uint64_t count, std::uint32_t dimension,
     std::uint32_t max_degree) {
     if (count < 2)
         return std::vector<std::vector<GraphEdge>>(static_cast<std::size_t>(count));
-    const auto work = static_cast<unsigned long long>(count) * count * dimension;
-    if (work > kMaxAdjacencyWork)
+    if (dimension == 0)
+        return Error{ErrorCode::invalid_argument, "Graph dimension must be positive"};
+    if (count > kMaxAdjacencyWork / dimension / count)
         return Error{ErrorCode::unsupported,
                      "Exact graph construction exceeds the work bound; use a smaller "
                      "fixture or connect the native builder"};
@@ -106,6 +109,35 @@ Result<std::vector<std::vector<GraphEdge>>> BuildAdjacency(
         }
     }
     return graph;
+}
+
+Result<std::uint64_t> WriteGraphRows(
+    const std::filesystem::path& path, const NodeRecordLayout& layout,
+    std::span<const float> vectors, const GraphAdjacency& adjacency,
+    const std::function<std::pair<VectorId, Sequence>(std::size_t)>& identity) {
+    if (!layout.dimension || vectors.size() % layout.dimension ||
+        adjacency.size() != vectors.size() / layout.dimension)
+        return Error{ErrorCode::invalid_argument, "Graph rows disagree with vector data"};
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return Error{ErrorCode::io_error, "Cannot open the staged graph"};
+    std::vector<std::byte> row(layout.row_bytes);
+    NodeRow record;
+    for (std::size_t node = 0; node < adjacency.size(); ++node) {
+        const auto [id, version] = identity(node);
+        record.id = id;
+        record.version = version;
+        record.neighbors.clear();
+        for (const auto& edge : adjacency[node]) record.neighbors.push_back(edge.node);
+        const auto encoded = EncodeNodeRow(
+            record, vectors.subspan(node * layout.dimension, layout.dimension), layout, row);
+        if (const auto* error = std::get_if<Error>(&encoded)) return *error;
+        output.write(reinterpret_cast<const char*>(row.data()),
+                     static_cast<std::streamsize>(row.size()));
+        if (!output) return Error{ErrorCode::io_error, "Cannot write the graph segment"};
+    }
+    output.close();
+    if (!output) return Error{ErrorCode::io_error, "Cannot close the staged graph"};
+    return static_cast<std::uint64_t>(layout.row_bytes) * adjacency.size();
 }
 
 }  // namespace agent_io

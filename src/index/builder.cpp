@@ -19,7 +19,6 @@
 namespace agent_io {
 namespace {
 
-constexpr std::uint64_t kMaxBuildWork = 4'000'000'000ull;  // node pairs x dimension
 constexpr std::uint32_t kDefaultBlockBytes = 4096;
 
 Error Invalid(std::string message) {
@@ -32,12 +31,11 @@ Error Failure(ErrorCode code, std::string message, int system_error = 0) {
     return error;
 }
 
-bool ReadWhole(const std::filesystem::path& path, std::vector<std::byte>& output) {
+bool ReadExact(const std::filesystem::path& path, std::span<std::byte> output) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) return false;
     const auto size = input.tellg();
-    if (size < 0) return false;
-    output.assign(static_cast<std::size_t>(size), std::byte{0});
+    if (size < 0 || static_cast<std::uint64_t>(size) != output.size()) return false;
     input.seekg(0);
     if (size > 0) input.read(reinterpret_cast<char*>(output.data()), size);
     return static_cast<bool>(input);
@@ -115,19 +113,29 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
         return Invalid("Build needs adapter_name and adapter_version");
     if (request.native_version.empty())
         return Invalid("Build needs native_version: the manifest records it");
+    if (request.vector_count > kMaxAdjacencyWork / request.dimension / request.vector_count)
+        return Failure(ErrorCode::unsupported, "Exact graph construction exceeds the work bound");
 
     // 1. Input validation happens before any staging directory exists.
-    std::vector<std::byte> vector_bytes;
-    if (!ReadWhole(request.vectors_path, vector_bytes))
-        return Failure(ErrorCode::io_error, "Cannot read the vector file");
-    std::vector<std::byte> id_bytes;
-    if (!ReadWhole(request.ids_path, id_bytes))
-        return Failure(ErrorCode::io_error, "Cannot read the ID file");
+    std::error_code path_error;
     const std::uint64_t expected_vectors = request.vector_count * request.dimension * 4;
-    if (vector_bytes.size() != expected_vectors)
+    const auto actual_vectors = std::filesystem::file_size(request.vectors_path, path_error);
+    if (path_error)
+        return Failure(ErrorCode::io_error, "Cannot inspect the vector file", path_error.value());
+    if (actual_vectors != expected_vectors)
         return Invalid("Vector file length does not match vector_count x dimension x 4");
-    if (id_bytes.size() != request.vector_count * 8)
+    const auto actual_ids = std::filesystem::file_size(request.ids_path, path_error);
+    if (path_error)
+        return Failure(ErrorCode::io_error, "Cannot inspect the ID file", path_error.value());
+    if (actual_ids != request.vector_count * 8)
         return Invalid("ID file length does not match vector_count x 8");
+
+    std::vector<float> vectors(static_cast<std::size_t>(request.vector_count) * request.dimension);
+    if (!ReadExact(request.vectors_path, std::as_writable_bytes(std::span(vectors))))
+        return Failure(ErrorCode::io_error, "Cannot read the vector file");
+    std::vector<VectorId> ids(static_cast<std::size_t>(request.vector_count));
+    if (!ReadExact(request.ids_path, std::as_writable_bytes(std::span(ids))))
+        return Failure(ErrorCode::io_error, "Cannot read the ID file");
 
     if (!request.vectors_sha256.empty()) {
         const auto digest = HashFile(request.vectors_path);
@@ -142,10 +150,6 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
             return Failure(ErrorCode::corruption, "ID file hash does not match the manifest");
     }
 
-    std::vector<float> vectors(static_cast<std::size_t>(request.vector_count) * request.dimension);
-    std::memcpy(vectors.data(), vector_bytes.data(), vector_bytes.size());
-    std::vector<VectorId> ids(static_cast<std::size_t>(request.vector_count));
-    std::memcpy(ids.data(), id_bytes.data(), id_bytes.size());
     std::unordered_set<VectorId> unique_ids;
     unique_ids.reserve(ids.size());
     for (const VectorId id : ids) {
@@ -156,16 +160,9 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
         if (!std::isfinite(value)) return Failure(ErrorCode::corruption,
                                                   "Vector payload contains a non-finite value");
 
-    std::error_code path_error;
     if (std::filesystem::exists(request.output_directory / "CURRENT", path_error))
         return Failure(ErrorCode::already_exists,
                        "Output already publishes an index; a first build will not overwrite it");
-    const auto free_space = FreeBytes(std::filesystem::exists(request.output_directory) ?
-        request.output_directory : request.output_directory.parent_path());
-    const std::uint64_t output_reservation = expected_vectors + request.vector_count * 8 + (1u << 20);
-    const std::uint64_t required = (std::max)(request.min_free_disk_bytes, output_reservation);
-    if (free_space != 0 && free_space < required)
-        return Failure(ErrorCode::resource_exhausted, "Not enough free disk for the build");
     if (std::filesystem::exists(request.staging_directory, path_error))
         return Failure(ErrorCode::already_exists, "Staging directory already exists");
 
@@ -183,11 +180,22 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
         static_cast<std::uint64_t>(layout.metadata_offset) + 16, block_bytes));
     const auto layout_status = ValidateLayout(layout, request.dimension, block_bytes);
     if (const auto* error = std::get_if<Error>(&layout_status)) return *error;
+    auto staging_parent = std::filesystem::absolute(request.staging_directory).parent_path();
+    while (!std::filesystem::exists(staging_parent, path_error) && !path_error &&
+           staging_parent.has_relative_path()) {
+        staging_parent = staging_parent.parent_path();
+    }
+    const auto free_space = FreeBytes(staging_parent);
+    const auto output_reservation = request.vector_count * layout.row_bytes +
+        AlignUp(request.vector_count * kVersionRecordBytes, block_bytes) + (1u << 20);
+    if (free_space < request.min_free_disk_bytes ||
+        output_reservation > free_space - request.min_free_disk_bytes)
+        return Failure(ErrorCode::resource_exhausted, "Not enough free disk for the build");
 
     auto graph = BuildAdjacency(vectors, request.vector_count, request.dimension,
                                 request.max_degree);
     if (const auto* error = std::get_if<Error>(&graph)) return *error;
-    const auto& adjacency = std::get<std::vector<std::vector<GraphEdge>>>(graph);
+    const auto& adjacency = std::get<GraphAdjacency>(graph);
 
     // 3. Stage the segment files.
     std::filesystem::create_directories(request.staging_directory, path_error);
@@ -200,26 +208,14 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
         std::filesystem::remove_all(request.staging_directory, ignored);
     };
 
-    std::vector<std::byte> row(static_cast<std::size_t>(layout.row_bytes) * request.vector_count);
-    for (std::uint64_t node = 0; node < request.vector_count; ++node) {
-        NodeRow record;
-        record.id = ids[static_cast<std::size_t>(node)];
-        record.version = 0;
-        for (const auto& edge : adjacency[static_cast<std::size_t>(node)])
-            record.neighbors.push_back(edge.node);
-        const auto encoded = EncodeNodeRow(
-            record, std::span<const float>(vectors.data() + node * request.dimension,
-                                           request.dimension),
-            layout, std::span<std::byte>(row.data() + node * layout.row_bytes,
-                                          layout.row_bytes));
-        if (const auto* error = std::get_if<Error>(&encoded)) {
-            cleanup_staging(false);
-            return *error;
-        }
-    }
     const auto graph_path = request.staging_directory / "graph.bin";
-    if (!WriteWhole(graph_path, row))
-        return Failure(ErrorCode::io_error, "Cannot write the graph segment");
+    const auto written = WriteGraphRows(graph_path, layout, vectors, adjacency,
+        [&ids](std::size_t node) { return std::pair{ids[node], Sequence{0}}; });
+    if (const auto* error = std::get_if<Error>(&written)) {
+        cleanup_staging(false);
+        return *error;
+    }
+    const auto graph_bytes = std::get<std::uint64_t>(written);
     if (!FlushPath(graph_path))
         return Failure(ErrorCode::io_error, "Cannot flush the graph segment",
                        static_cast<int>(GetLastError()));
@@ -276,7 +272,7 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
     metadata.parameters = request.native_parameters;
     metadata.version_directory_file = "versions.bin";
     metadata.version_entry_count = request.vector_count;
-    metadata.files.push_back(SegmentFileRecord{"graph.bin", row.size(), row.size(),
+    metadata.files.push_back(SegmentFileRecord{"graph.bin", graph_bytes, graph_bytes,
                                                std::get<Digest>(graph_digest)});
     metadata.files.push_back(SegmentFileRecord{"versions.bin", version_directory_bytes,
                                                version_physical,
@@ -302,10 +298,10 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
     }
     BuildOutcome outcome;
     outcome.artifacts.node_count = request.vector_count;
-    outcome.artifacts.file_bytes = row.size();
+    outcome.artifacts.file_bytes = graph_bytes;
     outcome.artifacts.content_sha256 = std::get<Digest>(graph_digest);
     outcome.artifacts.version_directory_sha256 = std::get<Digest>(versions_digest);
-    outcome.staged_bytes = row.size() + version_physical + encoded_metadata.size();
+    outcome.staged_bytes = graph_bytes + version_physical + encoded_metadata.size();
     outcome.native_version = request.native_version;
     outcome.peak_commit_bytes = CommitPeakBytes();
 
@@ -359,7 +355,7 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
     entry.kind = SegmentKind::base;
     entry.covered_sequence = 0;
     entry.node_count = request.vector_count;
-    entry.file_bytes = row.size();
+    entry.file_bytes = graph_bytes;
     entry.content_sha256 = std::get<Digest>(graph_digest);
     if (auto status = SetManifestText(entry.metadata.path,
         "segments/" + FormatUuid(metadata.uuid) + "/segment.json");
@@ -435,4 +431,3 @@ Result<BuildOutcome> RunFirstBuild(const FirstBuildRequest& request) {
 }
 
 }  // namespace agent_io
-
